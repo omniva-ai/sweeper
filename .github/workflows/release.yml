@@ -40,6 +40,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags
+        id: tags
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          tags="$IMAGE:$TAG"
+          if [[ "$TAG" != *-* ]]; then
+            tags="$tags,$IMAGE:latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         id: image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -47,7 +58,12 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
           sbom: true
           provenance: mode=max
 
@@ -64,7 +80,9 @@ jobs:
           ORAS_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "$ORAS_PASSWORD" | oras login ghcr.io -u "$ORAS_USER" --password-stdin
-          oras push --image-spec v1.0 "$MANIFESTS:$TAG" dist/install.yaml
+          (cd dist && oras push --image-spec v1.0 \
+            --annotation "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            "$MANIFESTS:$TAG" install.yaml)
           echo "digest=$(oras resolve "$MANIFESTS:$TAG")" >> "$GITHUB_OUTPUT"
 
       - name: Sign image and manifests
