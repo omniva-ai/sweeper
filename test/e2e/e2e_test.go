@@ -87,6 +87,13 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
+		// A spec's DeferCleanup runs after this AfterAll when that spec is the last one in the
+		// container, so policies can still exist here. Their finalizer needs the controller, so
+		// they must be gone before undeploy or CRD deletion blocks forever.
+		By("deleting all PodSweepPolicies while the controller can still finalize them")
+		cmd = exec.Command("kubectl", "delete", "podsweeppolicies", "--all", "--timeout=2m")
+		_, _ = utils.Run(cmd)
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
