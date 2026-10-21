@@ -66,11 +66,9 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= sweeper-test-e2e
-# kind's default node image (a very recent Kubernetes version) repeatedly failed
-# kubeadm's control-plane bootstrap on CI runners still on cgroup v1 (the node
-# logs a "cgroup v1 is deprecated" warning, then the API server never becomes
-# reachable). Pin to an older node image with better cgroup v1 support.
-KIND_NODE_IMAGE ?= kindest/node:v1.31.4
+# Keep the minor version in step with k8s.io/api in go.mod (which also sets the envtest
+# version) and with kubectl in mise.toml. Use an image that the pinned kind release lists.
+KIND_NODE_IMAGE ?= kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
