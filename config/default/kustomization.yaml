@@ -1,11 +1,8 @@
 # Adds namespace to all resources.
 namespace: sweeper-system
 
-# Value of this field is prepended to the
-# names of all resources, e.g. a deployment named
-# "wordpress" becomes "alices-wordpress".
-# Note that it should also match with the prefix (text before '-') of the namespace
-# field above.
+# Prepended to the names of all resources, e.g. "controller-manager" becomes
+# "sweeper-controller-manager". Keep it in step with the namespace above.
 namePrefix: sweeper-
 
 # Labels to add to all resources and selectors.
