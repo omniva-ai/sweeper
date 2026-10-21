@@ -1,0 +1,12 @@
+apiVersion: sweeper.omniva.com/v1alpha1
+kind: PodSweepPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: sweeper
+    app.kubernetes.io/managed-by: kustomize
+  name: stale-batch-pods
+spec:
+  namespaceSelector: {}
+  podSelector: {}
+  ttl: 1h
+  mode: report

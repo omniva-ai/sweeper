@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- sweeper_v1alpha1_podsweeppolicy.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

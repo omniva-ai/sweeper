@@ -1,0 +1,8 @@
+[tools]
+go = "1.26.7"
+kind = "0.32.0"
+kubectl = "1.33.3"
+golangci-lint = "2.13.1"
+oras = "1.2.0"
+"go:sigs.k8s.io/controller-tools/cmd/controller-gen" = "v0.21.0"
+"go:sigs.k8s.io/controller-runtime/tools/setup-envtest" = "v0.24.1"
