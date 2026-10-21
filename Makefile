@@ -61,10 +61,7 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -race $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
+# The e2e setup assumes Kind is installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= sweeper-test-e2e
 # Keep the minor version in step with k8s.io/api in go.mod (which also sets the envtest
 # version) and with kubectl in mise.toml. Use an image that the pinned kind release lists.
