@@ -212,12 +212,12 @@ these needs to stop and either be redesigned or have this doc explicitly updated
 
 ## Delivery
 
-### Toolchain: mise + devbox
+### Toolchain: mise
 
-Both are configured and kept in sync, pinning: Go, `controller-gen`, `golangci-lint`, `kind`,
-`kubectl`, and `setup-envtest` (for the envtest binaries unit tests need). Either toolchain works
-locally; CI uses mise to install the pinned versions (simpler to script in a GitLab CI image than
-devbox's Nix-based install).
+`mise.toml` pins Go, `controller-gen`, `golangci-lint`, `kind`, `kubectl`, `setup-envtest` (for the
+envtest binaries unit tests need), and the release and CI tools (`oras`, `cosign`, `gitleaks`,
+`actionlint`). CI installs the same pinned versions through `jdx/mise-action`, so local and CI
+toolchains match.
 
 ### Tests
 
@@ -228,20 +228,26 @@ devbox's Nix-based install).
   apply the CRDs and sample `PodSweepPolicy` objects, and assert on both `report` (pod survives,
   gauge increments) and `enforce` (pod is deleted, counter increments) behavior.
 
-### CI (`.gitlab-ci.yml`)
+### CI (`.github/workflows/`)
 
-Stages: `lint` (`golangci-lint`) → `build` (`go build ./...`) → `test` (`go test -race ./...` via
-envtest) → `e2e` (spin up `kind`, run `test/e2e`).
+`ci.yml` runs on every pull request and push to `main`, with these jobs: `lint` (`golangci-lint`
+and `actionlint`), `gitleaks`, `build` (`make build`, then a check that generated files are
+committed), `test` (`go test -race` via envtest), and `e2e` (spin up `kind`, run `test/e2e`).
+`codeql.yml` and `scorecard.yml` add CodeQL and OpenSSF Scorecard analysis.
 
 ### Release pipeline
 
-Triggered on a semver tag push (`v*.*.*`):
+`release.yml` is triggered on a semver tag push (`v*.*.*`):
 
-1. Build and push a multi-arch application OCI image tagged with the semver.
-2. Render the kustomize manifests and push them as a second OCI artifact tagged with the same
-   semver (ADR-0003 records the exact mechanism).
-3. Attach the same rendered manifests to the GitLab Release as a release asset link, so the
-   release page has them directly downloadable without pulling the OCI artifact.
+1. Build and push a multi-arch (`linux/amd64`, `linux/arm64`) application image to
+   `ghcr.io/omniva-ai/sweeper`, tagged with the semver, with SBOM and provenance attestations.
+2. Render the kustomize manifests and push them as a second OCI artifact,
+   `ghcr.io/omniva-ai/sweeper-manifests`, tagged with the same semver (ADR-0003 records the
+   exact mechanism).
+3. Sign both artifacts keyless with `cosign`, using the workflow's GitHub OIDC identity.
+4. Create a GitHub Release with the rendered manifests attached as `install.yaml`, so the release
+   page has them directly downloadable without pulling the OCI artifact. Tags with a
+   pre-release suffix (e.g. `v1.2.0-rc.1`) are marked as pre-releases.
 
 ## Deep dives
 

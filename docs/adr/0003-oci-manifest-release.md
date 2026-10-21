@@ -11,7 +11,7 @@ application's OCI image:
 
 - an OCI artifact containing the operator's Kubernetes manifests (CRDs, RBAC, Deployment, etc.),
   versioned the same way as the application image
-- the same manifests attached to the GitLab Release itself as a downloadable asset
+- the same manifests attached to the GitHub Release itself as a downloadable asset
 
 Two mechanisms were considered for the manifest OCI artifact:
 
@@ -24,8 +24,9 @@ Two mechanisms were considered for the manifest OCI artifact:
 
 Render with `kustomize build` (kubebuilder's default scaffolding already produces a
 `config/` kustomize tree) and publish the rendered YAML as a generic OCI artifact via
-`oras push`, tagged with the release semver. The same rendered YAML is attached to the GitLab
-Release as an asset link via `release-cli` in the same pipeline job.
+`oras push`, tagged with the release semver. The same rendered YAML is attached to the GitHub
+Release as an asset via `gh release create` in the same workflow job. Both the image and the
+manifests artifact are published to GHCR and signed keyless with `cosign`.
 
 ## Rationale
 
@@ -42,9 +43,9 @@ Release as an asset link via `release-cli` in the same pipeline job.
 
 ## Consequences
 
-- `oras` is added to the CI toolchain (and to `mise`/`devbox`, per
-  [`ARCHITECTURE.md`](../ARCHITECTURE.md#toolchain-mise--devbox)) purely as a release-time build
-  tool, not a project dependency.
+- `oras` is added to the toolchain (`mise.toml`, per
+  [`ARCHITECTURE.md`](../ARCHITECTURE.md#toolchain-mise)) purely as a release-time build tool,
+  not a project dependency.
 - If downstream consumers later want a Helm-native install path (e.g. `helm install` with values
   overrides), that would need its own follow-up ADR superseding this one — this decision is
   explicitly the "simplest thing that satisfies the current ask" rather than a permanent

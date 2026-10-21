@@ -23,13 +23,10 @@ invariants.
 ## Prerequisites
 
 Toolchain versions (Go, kind, kubectl, golangci-lint, controller-gen,
-setup-envtest) are pinned via [mise](https://mise.jdx.dev/) (`mise.toml`) or
-[devbox](https://www.jetify.com/devbox) (`devbox.json`):
+setup-envtest) are pinned via [mise](https://mise.jdx.dev/) (`mise.toml`):
 
 ```
 mise install
-# or
-devbox shell
 ```
 
 ## Build
