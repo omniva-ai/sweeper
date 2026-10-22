@@ -1,0 +1,54 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sweeper.omniva.com
+  resources:
+  - podsweeppolicies
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sweeper.omniva.com
+  resources:
+  - podsweeppolicies/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - sweeper.omniva.com
+  resources:
+  - podsweeppolicies/status
+  verbs:
+  - get
+  - patch
+  - update
