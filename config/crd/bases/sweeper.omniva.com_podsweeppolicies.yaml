@@ -158,9 +158,18 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               ttl:
-                description: TTL is how long a pod may sit in the Failed phase before
-                  it becomes eligible for deletion.
+                description: |-
+                  TTL is how long a pod may sit in the Failed phase before it becomes eligible for deletion.
+                  It is a Go duration (for example 72h, 1h30m or 500ms) and must be greater than zero.
+                  Accepted units are ns, us, ms, s, m and h. A day unit such as 1d is not supported.
                 type: string
+                x-kubernetes-validations:
+                - message: ttl must be a Go duration such as 72h, 1h30m or 500ms;
+                    a day unit (1d) is not supported
+                  rule: self.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$')
+                - message: ttl must be greater than 0s
+                  rule: '!self.matches(''^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$'')
+                    || duration(self) > duration(''0s'')'
             required:
             - ttl
             type: object

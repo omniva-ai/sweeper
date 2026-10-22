@@ -42,7 +42,7 @@ const (
 	reasonDisabled                    = "Disabled"
 )
 
-// ValidationSubReconciler parses spec.ttl/spec.mode, applies the operator-level
+// ValidationSubReconciler validates spec.ttl/spec.mode, applies the operator-level
 // protected-namespace gate to spec.namespaceSelector, and sets status.conditions accordingly. It
 // implements reconciler.Reconciler.
 type ValidationSubReconciler struct {
@@ -71,9 +71,11 @@ func (r *ValidationSubReconciler) Name() string {
 	return "validation"
 }
 
-// Reconcile parses and validates spec.ttl/spec.mode, applies the protected-namespace gate, and
-// sets status.conditions. It fails fast (returns an error) on an unparseable ttl or unknown mode
-// so the object's status reflects a clear validation failure rather than silently no-op'ing.
+// Reconcile validates spec.ttl/spec.mode, applies the protected-namespace gate, and sets
+// status.conditions. The CRD schema already rejects a malformed or non-positive ttl and an
+// unknown mode at admission; the checks here are defense in depth for objects stored before
+// those rules existed. They fail fast (return an error) so the object's status reflects a clear
+// validation failure rather than silently no-op'ing.
 func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, error) {
 	mode := r.Policy.Spec.Mode
 	if mode == "" {

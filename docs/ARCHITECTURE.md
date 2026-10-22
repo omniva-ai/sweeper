@@ -39,7 +39,8 @@ spec:
                           # protected-namespace gate below
   podSelector: {}         # metav1.LabelSelector; empty = all pods
   ttl: 1h                 # metav1.Duration; how long a pod may sit in Failed before it's
-                          # eligible for deletion
+                          # eligible for deletion. A Go duration such as 72h, 1h30m or 500ms,
+                          # greater than 0s; a day unit (1d) is not supported.
   mode: report            # enforce | report | disable — defaults to report if omitted
 status:
   observedGeneration: 1
@@ -152,10 +153,14 @@ sequenceDiagram
     Main-->>Mgr: ctrl.Result{RequeueAfter: jittered}, nil
 ```
 
-1. **`ValidationSubReconciler`** — parses `spec.ttl`, resolves `spec.mode` (empty → `report`),
-   applies the protected-namespace gate to `spec.namespaceSelector`, and sets `status.conditions`
-   accordingly. Fails fast (returns an error) on an unparseable `ttl` or unknown `mode` value so
-   the object's status reflects a clear validation failure rather than silently no-op'ing.
+1. **`ValidationSubReconciler`** — resolves `spec.mode` (empty → `report`), applies the
+   protected-namespace gate to `spec.namespaceSelector`, and sets `status.conditions` accordingly.
+   The format of `spec.ttl` (a positive Go duration) and the `spec.mode` enum are enforced by the
+   CRD schema at admission time; the `ttl` rules use CEL validation, which needs Kubernetes 1.25 or
+   later. The sub-reconciler re-checks `ttl > 0` and the `mode` value as defense in depth for
+   objects stored before the schema rules existed; on failure it sets `Ready=False` with reason
+   `InvalidTTL` or `InvalidMode` and returns an error so the object is requeued rather than
+   silently no-op'ing.
 2. **`EvaluationSubReconciler`** — for the resolved (post-protected-namespace-gate) namespace and
    pod selectors: lists `Failed`-phase pods, computes failed-since + TTL-eligibility for each,
    updates the "currently identified" gauge, and — only when `mode == enforce` — deletes eligible
