@@ -9,15 +9,24 @@ updates:
     groups:
       k8s:
         patterns: ['k8s.io/*', 'sigs.k8s.io/*']
+      go-modules:
+        patterns: ['*']
+        exclude-patterns: ['k8s.io/*', 'sigs.k8s.io/*']
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     commit-message:
       prefix: ci(deps)
+    groups:
+      github-actions:
+        patterns: ['*']
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
     commit-message:
       prefix: build(deps)
+    groups:
+      docker:
+        patterns: ['*']
