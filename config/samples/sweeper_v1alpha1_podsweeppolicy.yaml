@@ -8,5 +8,5 @@ metadata:
 spec:
   namespaceSelector: {}
   podSelector: {}
-  ttl: 1h
+  ttl: 1h  # Go duration such as 72h, 1h30m or 500ms; must be > 0; a day unit (1d) is not supported
   mode: report
