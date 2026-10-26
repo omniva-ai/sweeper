@@ -329,6 +329,27 @@ var _ = Describe("ValidationSubReconciler", func() {
 		Expect(recorder.Events).To(HaveLen(1))
 	})
 
+	It("records one Warning when the generation changes but the failure does not", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "repeat-failure-new-generation", Generation: 1},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		cl := newValidationTestClient(policy)
+		r := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
+
+		_, err := r.Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+		policy.Generation = 2
+		_, err = r.Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		Expect(recorder.Events).To(HaveLen(1))
+		Expect(readyCondition(policy).ObservedGeneration).To(BeEquivalentTo(2))
+	})
+
 	It("skips a protected namespace, sets the condition, and records a Warning event", func() {
 		policy := &sweeperv1alpha1.PodSweepPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "protected"},

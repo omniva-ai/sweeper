@@ -54,6 +54,20 @@ func writeStatusIfChanged(ctx context.Context, cl client.Client,
 	return cl.Status().Update(ctx, policy)
 }
 
+// setFailureCondition sets condType to False with reason and message and records a Warning
+// event only when the condition's status or reason transitioned. A message or observed
+// generation change alone updates the condition without a new event, so a persistent failure
+// produces one event however many passes or spec edits repeat it. It returns true when the
+// condition changed in any way, for the status write.
+func setFailureCondition(recorder record.EventRecorder, policy *sweeperv1alpha1.PodSweepPolicy,
+	condType, reason, message string) bool {
+	prev := meta.FindStatusCondition(policy.Status.Conditions, condType)
+	transitioned := prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason
+	changed := setCondition(policy, condType, metav1.ConditionFalse, reason, message)
+	recordWarningIfChanged(recorder, policy, transitioned, reason, message)
+	return changed
+}
+
 // recordWarningIfChanged records a Warning event with reason and message only when changed is
 // true, so a condition that stays in the same state across passes produces one event.
 func recordWarningIfChanged(recorder record.EventRecorder,

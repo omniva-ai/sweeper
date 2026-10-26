@@ -801,6 +801,31 @@ func TestEvaluationSubReconcilerConditions(t *testing.T) {
 		}
 	})
 
+	t.Run("records one Warning when the generation changes but the failure does not", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeReport)
+		policy.Generation = 1
+		c := &listErrorForClient{Client: newFakeClientForEval(t, ns, policy), failFor: &corev1.PodList{}}
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+		r, recorder := newReconciler(c, policy)
+
+		if _, err := r.Reconcile(context.Background()); err == nil {
+			t.Fatal("Reconcile() #1 error = nil, want an error")
+		}
+		policy.Generation = 2
+		if _, err := r.Reconcile(context.Background()); err == nil {
+			t.Fatal("Reconcile() #2 error = nil, want an error")
+		}
+		if got := len(recorder.Events); got != 1 {
+			t.Errorf("events = %d, want 1", got)
+		}
+		// The fake client's status update copies the stored metadata back, which resets the
+		// in-memory Generation to 1, so compare the condition against the literal generation.
+		cond := meta.FindStatusCondition(policy.Status.Conditions, sweeperv1alpha1.ConditionTypeEvaluated)
+		if cond == nil || cond.ObservedGeneration != 2 {
+			t.Errorf("Evaluated = %+v, want ObservedGeneration 2", cond)
+		}
+	})
+
 	t.Run("restores Evaluated=True after a failure clears", func(t *testing.T) {
 		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeReport)
 		base := newFakeClientForEval(t, ns, policy)
