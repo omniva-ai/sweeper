@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -43,13 +44,22 @@ import (
 // expiry when no Pod watch event arrives in the meantime.
 const defaultPollInterval = 5 * time.Minute
 
+const (
+	reasonEvaluated     = "Evaluated"
+	reasonPodListFailed = "PodListFailed"
+	reasonDeleteFailed  = "DeleteFailed"
+)
+
 // EvaluationSubReconciler lists Failed-phase pods in the namespaces resolveNamespaceGate matches
 // for this policy, deletes those that have crossed TTL when Mode is enforce, and re-triggers
-// evaluation on Pod phase=Failed transitions. It implements
-// reconciler.Reconciler and Watcher.
+// evaluation on Pod phase=Failed transitions. It records the outcome of each pass in the
+// Evaluated condition (True after a clean pass, False with the failure reason otherwise) and
+// records a Warning event when that condition turns False. It implements reconciler.Reconciler
+// and Watcher.
 type EvaluationSubReconciler struct {
 	client.Client
 
+	Recorder            record.EventRecorder
 	Policy              *sweeperv1alpha1.PodSweepPolicy
 	ProtectedNamespaces sets.Set[string]
 	AllowedNamespaces   sets.Set[string]
@@ -60,10 +70,11 @@ type EvaluationSubReconciler struct {
 
 // NewEvaluationSubReconciler constructs an EvaluationSubReconciler for a single reconcile
 // request against policy.
-func NewEvaluationSubReconciler(cl client.Client, policy *sweeperv1alpha1.PodSweepPolicy,
-	protected, allowed sets.Set[string]) *EvaluationSubReconciler {
+func NewEvaluationSubReconciler(cl client.Client, recorder record.EventRecorder,
+	policy *sweeperv1alpha1.PodSweepPolicy, protected, allowed sets.Set[string]) *EvaluationSubReconciler {
 	return &EvaluationSubReconciler{
 		Client:              cl,
+		Recorder:            recorder,
 		Policy:              policy,
 		ProtectedNamespaces: protected,
 		AllowedNamespaces:   allowed,
@@ -79,13 +90,15 @@ func (r *EvaluationSubReconciler) Name() string {
 func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, error) {
 	if r.Policy.Spec.Mode == sweeperv1alpha1.ModeDisable {
 		metrics.DeletePolicy(r.Policy.Name)
-		return ctrl.Result{}, nil
+		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+			metav1.ConditionFalse, reasonDisabled, "mode is disable; rule is not evaluated")
+		return ctrl.Result{}, writeStatusIfChanged(ctx, r.Client, r.Policy, changed)
 	}
 
 	matched, _, err := resolveNamespaceGate(ctx, r.Client, r.Policy.Spec.NamespaceSelector,
 		r.ProtectedNamespaces, r.AllowedNamespaces)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving namespace gate: %w", err)
+		return r.failEvaluated(ctx, reasonNamespaceListFailed, fmt.Errorf("listing namespaces: %w", err))
 	}
 
 	podSelector, err := asSelector(r.Policy.Spec.PodSelector)
@@ -101,7 +114,7 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 			opts = append(opts, client.MatchingLabelsSelector{Selector: podSelector})
 		}
 		if err := r.List(ctx, &podList, opts...); err != nil {
-			return ctrl.Result{}, fmt.Errorf("listing pods in namespace %s: %w", ns, err)
+			return r.failEvaluated(ctx, reasonPodListFailed, fmt.Errorf("listing pods in namespace %s: %w", ns, err))
 		}
 		for i := range podList.Items {
 			if podList.Items[i].Status.Phase == corev1.PodFailed {
@@ -140,7 +153,34 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 		}
 	}
 
-	return requeue.WithJitterAndError(requeueAfter, deleteErr)
+	if deleteErr != nil {
+		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+			metav1.ConditionFalse, reasonDeleteFailed, deleteErr.Error())
+		recordWarningIfChanged(r.Recorder, r.Policy, changed, reasonDeleteFailed, deleteErr.Error())
+		statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed)
+		return requeue.WithJitterAndError(requeueAfter, errors.Join(deleteErr, statusErr))
+	}
+
+	changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+		metav1.ConditionTrue, reasonEvaluated, "pods were listed and evaluated")
+	if err := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return requeue.WithJitterAndError(requeueAfter, nil)
+}
+
+// failEvaluated sets Evaluated=False with reason and cause's message, records a Warning when
+// the condition changed, writes status, and returns cause joined with any status error so the
+// object is requeued with backoff.
+func (r *EvaluationSubReconciler) failEvaluated(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
+	changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+		metav1.ConditionFalse, reason, cause.Error())
+	recordWarningIfChanged(r.Recorder, r.Policy, changed, reason, cause.Error())
+	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
+		return ctrl.Result{}, errors.Join(cause, statusErr)
+	}
+	return ctrl.Result{}, cause
 }
 
 // Delete implements reconciler.Reconciler. It is a no-op: EvaluationSubReconciler owns no

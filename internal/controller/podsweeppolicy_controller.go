@@ -77,7 +77,7 @@ func (r *PodSweepPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	subReconcilers := []reconciler.Reconciler{
 		NewValidationSubReconciler(r.Client, r.Recorder, &policy, protected, allowed),
-		NewEvaluationSubReconciler(r.Client, &policy, protected, allowed),
+		NewEvaluationSubReconciler(r.Client, r.Recorder, &policy, protected, allowed),
 	}
 
 	for _, sub := range subReconcilers {
