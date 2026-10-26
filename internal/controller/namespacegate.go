@@ -21,7 +21,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -32,14 +31,10 @@ import (
 // protected-namespace gate is computed identically by both.
 func resolveNamespaceGate(ctx context.Context, cl client.Client, selector *metav1.LabelSelector,
 	protected, allowed sets.Set[string]) (matched, skipped []string, err error) {
-	// An absent selector means "all namespaces" per the CRD's documented semantics, but
-	// metav1.LabelSelectorAsSelector(nil) returns labels.Nothing() — the opposite.
-	labelSelector := labels.Everything()
-	if selector != nil {
-		labelSelector, err = metav1.LabelSelectorAsSelector(selector)
-		if err != nil {
-			return nil, nil, err
-		}
+	// asSelector treats an absent selector as "all namespaces" per the CRD's documented semantics.
+	labelSelector, err := asSelector(selector)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	var namespaces corev1.NamespaceList
