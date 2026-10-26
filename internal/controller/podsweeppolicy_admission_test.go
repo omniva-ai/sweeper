@@ -29,9 +29,9 @@ import (
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 )
 
-// ttlPolicy builds an unstructured PodSweepPolicy so spec.ttl can hold any string,
-// including values a typed metav1.Duration could never serialize.
-func ttlPolicy(name, ttl string) *unstructured.Unstructured {
+// unstructuredPolicy builds an unstructured PodSweepPolicy around spec, so fields can hold any
+// value, including ones the typed API could never serialize.
+func unstructuredPolicy(name string, spec map[string]interface{}) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": sweeperv1alpha1.GroupVersion.String(),
@@ -39,11 +39,15 @@ func ttlPolicy(name, ttl string) *unstructured.Unstructured {
 			"metadata": map[string]interface{}{
 				"name": name,
 			},
-			"spec": map[string]interface{}{
-				"ttl": ttl,
-			},
+			"spec": spec,
 		},
 	}
+}
+
+// ttlPolicy builds an unstructured PodSweepPolicy so spec.ttl can hold any string,
+// including values a typed metav1.Duration could never serialize.
+func ttlPolicy(name, ttl string) *unstructured.Unstructured {
+	return unstructuredPolicy(name, map[string]interface{}{"ttl": ttl})
 }
 
 var _ = Describe("PodSweepPolicy admission", func() {
@@ -115,4 +119,66 @@ var _ = Describe("PodSweepPolicy admission", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("a day unit (1d) is not supported"))
 	})
+})
+
+// selectorPolicy builds an unstructured PodSweepPolicy with a valid ttl and the given selector
+// under field ("namespaceSelector" or "podSelector"), so a matchExpressions entry can hold any
+// operator string the CRD schema would otherwise accept.
+func selectorPolicy(name, field string, selector map[string]interface{}) *unstructured.Unstructured {
+	return unstructuredPolicy(name, map[string]interface{}{"ttl": "1h", field: selector})
+}
+
+// matchExpressions builds a selector with one matchExpressions entry on key "a". A nil values
+// slice omits the values field; an empty one sends an empty list.
+func matchExpressions(operator string, values []string) map[string]interface{} {
+	e := map[string]interface{}{"key": "a", "operator": operator}
+	if values != nil {
+		vals := make([]interface{}, 0, len(values))
+		for _, v := range values {
+			vals = append(vals, v)
+		}
+		e["values"] = vals
+	}
+	return map[string]interface{}{"matchExpressions": []interface{}{e}}
+}
+
+var _ = Describe("PodSweepPolicy selector admission", func() {
+	const (
+		operatorMessage = "operator must be one of In, NotIn, Exists, DoesNotExist"
+		valuesMessage   = "values must be set for In and NotIn and empty for Exists and DoesNotExist"
+	)
+
+	DescribeTable("rejects a selector with a bad matchExpressions entry",
+		func(name, field string, selector map[string]interface{}, wantMessage string) {
+			err := k8sClient.Create(context.Background(), selectorPolicy(name, field, selector))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec." + field))
+			Expect(err.Error()).To(ContainSubstring(wantMessage))
+		},
+		Entry("operator Foo on namespaceSelector", "sel-ns-foo", "namespaceSelector",
+			matchExpressions("Foo", nil), operatorMessage),
+		Entry("operator Foo on podSelector", "sel-pod-foo", "podSelector",
+			matchExpressions("Foo", nil), operatorMessage),
+		Entry("In without values", "sel-in-novalues", "podSelector",
+			matchExpressions("In", nil), valuesMessage),
+		Entry("NotIn with empty values", "sel-notin-empty", "podSelector",
+			matchExpressions("NotIn", []string{}), valuesMessage),
+		Entry("Exists with values", "sel-exists-values", "podSelector",
+			matchExpressions("Exists", []string{"x"}), valuesMessage),
+		Entry("DoesNotExist with values", "sel-dne-values", "namespaceSelector",
+			matchExpressions("DoesNotExist", []string{"x"}), valuesMessage),
+	)
+
+	DescribeTable("accepts a well-formed selector",
+		func(name string, selector map[string]interface{}) {
+			Expect(k8sClient.Create(context.Background(), selectorPolicy(name, "podSelector", selector))).To(Succeed())
+		},
+		Entry("Exists without values", "sel-ok-exists",
+			matchExpressions("Exists", nil)),
+		Entry("In with values", "sel-ok-in",
+			matchExpressions("In", []string{"x", "y"})),
+		Entry("matchLabels only", "sel-ok-labels",
+			map[string]interface{}{"matchLabels": map[string]interface{}{"a": "b"}}),
+		Entry("empty selector", "sel-ok-empty", map[string]interface{}{}),
+	)
 })

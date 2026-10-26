@@ -37,6 +37,9 @@ const (
 	// by spec.namespaceSelector were excluded from evaluation because they are protected at the
 	// operator level and have not been explicitly unlocked.
 	ConditionTypeNamespacesSkippedProtected = "NamespacesSkippedProtected"
+	// ConditionTypeEvaluated indicates whether the last evaluation pass listed pods and, in
+	// enforce mode, deleted eligible ones, without error.
+	ConditionTypeEvaluated = "Evaluated"
 )
 
 // PodSweepPolicySpec defines the desired state of PodSweepPolicy.
@@ -44,11 +47,15 @@ type PodSweepPolicySpec struct {
 	// NamespaceSelector selects the namespaces this rule applies to. An empty or absent selector
 	// matches all namespaces, subject to the operator-level protected-namespace gate.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!has(self.matchExpressions) || self.matchExpressions.all(e, e.operator in ['In', 'NotIn', 'Exists', 'DoesNotExist'])",message="matchExpressions operator must be one of In, NotIn, Exists, DoesNotExist"
+	// +kubebuilder:validation:XValidation:rule="!has(self.matchExpressions) || self.matchExpressions.all(e, !(e.operator in ['In', 'NotIn', 'Exists', 'DoesNotExist']) || ((e.operator in ['In', 'NotIn']) ? (has(e.values) && size(e.values) > 0) : (!has(e.values) || size(e.values) == 0)))",message="matchExpressions values must be set for In and NotIn and empty for Exists and DoesNotExist"
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
 
 	// PodSelector selects the pods this rule applies to within matched namespaces. An empty or
 	// absent selector matches all pods.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!has(self.matchExpressions) || self.matchExpressions.all(e, e.operator in ['In', 'NotIn', 'Exists', 'DoesNotExist'])",message="matchExpressions operator must be one of In, NotIn, Exists, DoesNotExist"
+	// +kubebuilder:validation:XValidation:rule="!has(self.matchExpressions) || self.matchExpressions.all(e, !(e.operator in ['In', 'NotIn', 'Exists', 'DoesNotExist']) || ((e.operator in ['In', 'NotIn']) ? (has(e.values) && size(e.values) > 0) : (!has(e.values) || size(e.values) == 0)))",message="matchExpressions values must be set for In and NotIn and empty for Exists and DoesNotExist"
 	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
 
 	// TTL is how long a pod may sit in the Failed phase before it becomes eligible for deletion.
@@ -87,6 +94,7 @@ type PodSweepPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="TTL",type=string,JSONPath=`.spec.ttl`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Evaluated",type=string,JSONPath=`.status.conditions[?(@.type=="Evaluated")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // PodSweepPolicy is the Schema for the podsweeppolicies API.
