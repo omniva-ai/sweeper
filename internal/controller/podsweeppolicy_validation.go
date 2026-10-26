@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -157,8 +156,5 @@ func (r *ValidationSubReconciler) failReady(ctx context.Context, reason string, 
 	readyChanged := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeReady, reason, cause.Error())
 	evaluatedChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
 		metav1.ConditionFalse, reasonNotReady, "rule is not evaluated while Ready is False")
-	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, readyChanged || evaluatedChanged); statusErr != nil {
-		return ctrl.Result{}, errors.Join(cause, statusErr)
-	}
-	return ctrl.Result{}, cause
+	return ctrl.Result{}, writeFailure(ctx, r.Client, r.Policy, readyChanged || evaluatedChanged, cause)
 }

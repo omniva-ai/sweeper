@@ -98,7 +98,7 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	matched, _, err := resolveNamespaceGate(ctx, r.Client, r.Policy.Spec.NamespaceSelector,
 		r.ProtectedNamespaces, r.AllowedNamespaces)
 	if err != nil {
-		return r.failEvaluated(ctx, reasonNamespaceListFailed, fmt.Errorf("listing namespaces: %w", err))
+		return ctrl.Result{}, r.failEvaluated(ctx, reasonNamespaceListFailed, fmt.Errorf("listing namespaces: %w", err))
 	}
 
 	podSelector, err := asSelector(r.Policy.Spec.PodSelector)
@@ -114,7 +114,7 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 			opts = append(opts, client.MatchingLabelsSelector{Selector: podSelector})
 		}
 		if err := r.List(ctx, &podList, opts...); err != nil {
-			return r.failEvaluated(ctx, reasonPodListFailed, fmt.Errorf("listing pods in namespace %s: %w", ns, err))
+			return ctrl.Result{}, r.failEvaluated(ctx, reasonPodListFailed, fmt.Errorf("listing pods in namespace %s: %w", ns, err))
 		}
 		for i := range podList.Items {
 			if podList.Items[i].Status.Phase == corev1.PodFailed {
@@ -154,10 +154,7 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	}
 
 	if deleteErr != nil {
-		changed := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
-			reasonDeleteFailed, deleteErr.Error())
-		statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed)
-		return requeue.WithJitterAndError(requeueAfter, errors.Join(deleteErr, statusErr))
+		return requeue.WithJitterAndError(requeueAfter, r.failEvaluated(ctx, reasonDeleteFailed, deleteErr))
 	}
 
 	changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
@@ -171,13 +168,11 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 
 // failEvaluated sets Evaluated=False with reason and cause's message, records a Warning when
 // the condition transitioned to this failure, writes status, and returns cause joined with any
-// status error so the object is requeued with backoff.
-func (r *EvaluationSubReconciler) failEvaluated(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
+// status error. Callers pick the result: an empty one, or the jittered requeue after a delete
+// failure.
+func (r *EvaluationSubReconciler) failEvaluated(ctx context.Context, reason string, cause error) error {
 	changed := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeEvaluated, reason, cause.Error())
-	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
-		return ctrl.Result{}, errors.Join(cause, statusErr)
-	}
-	return ctrl.Result{}, cause
+	return writeFailure(ctx, r.Client, r.Policy, changed, cause)
 }
 
 // Delete implements reconciler.Reconciler. It is a no-op: EvaluationSubReconciler owns no
