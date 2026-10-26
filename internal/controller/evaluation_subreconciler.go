@@ -154,9 +154,8 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	}
 
 	if deleteErr != nil {
-		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
-			metav1.ConditionFalse, reasonDeleteFailed, deleteErr.Error())
-		recordWarningIfChanged(r.Recorder, r.Policy, changed, reasonDeleteFailed, deleteErr.Error())
+		changed := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+			reasonDeleteFailed, deleteErr.Error())
 		statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed)
 		return requeue.WithJitterAndError(requeueAfter, errors.Join(deleteErr, statusErr))
 	}
@@ -171,12 +170,10 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 }
 
 // failEvaluated sets Evaluated=False with reason and cause's message, records a Warning when
-// the condition changed, writes status, and returns cause joined with any status error so the
-// object is requeued with backoff.
+// the condition transitioned to this failure, writes status, and returns cause joined with any
+// status error so the object is requeued with backoff.
 func (r *EvaluationSubReconciler) failEvaluated(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
-	changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
-		metav1.ConditionFalse, reason, cause.Error())
-	recordWarningIfChanged(r.Recorder, r.Policy, changed, reason, cause.Error())
+	changed := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeEvaluated, reason, cause.Error())
 	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
 		return ctrl.Result{}, errors.Join(cause, statusErr)
 	}

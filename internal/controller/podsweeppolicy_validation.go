@@ -151,14 +151,12 @@ func (r *ValidationSubReconciler) Delete(_ context.Context) (ctrl.Result, error)
 
 // failReady sets Ready=False with reason and cause's message, sets Evaluated=False/NotReady
 // because the main reconciler stops the chain on the returned error and evaluation never runs,
-// records a Warning when Ready changed, writes status, and returns cause joined with any status
-// error so the object is requeued.
+// records a Warning when Ready transitioned to this failure, writes status, and returns cause
+// joined with any status error so the object is requeued.
 func (r *ValidationSubReconciler) failReady(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
-	readyChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady,
-		metav1.ConditionFalse, reason, cause.Error())
+	readyChanged := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeReady, reason, cause.Error())
 	evaluatedChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
 		metav1.ConditionFalse, reasonNotReady, "rule is not evaluated while Ready is False")
-	recordWarningIfChanged(r.Recorder, r.Policy, readyChanged, reason, cause.Error())
 	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, readyChanged || evaluatedChanged); statusErr != nil {
 		return ctrl.Result{}, errors.Join(cause, statusErr)
 	}
