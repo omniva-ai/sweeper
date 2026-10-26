@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -66,6 +67,16 @@ func setFailureCondition(recorder record.EventRecorder, policy *sweeperv1alpha1.
 	changed := setCondition(policy, condType, metav1.ConditionFalse, reason, message)
 	recordWarningIfChanged(recorder, policy, transitioned, reason, message)
 	return changed
+}
+
+// writeFailure writes status after a failure when changed is true and returns cause joined with
+// any status error, so every failure path returns the same shape and the object is requeued.
+func writeFailure(ctx context.Context, cl client.Client, policy *sweeperv1alpha1.PodSweepPolicy,
+	changed bool, cause error) error {
+	if statusErr := writeStatusIfChanged(ctx, cl, policy, changed); statusErr != nil {
+		return errors.Join(cause, statusErr)
+	}
+	return cause
 }
 
 // recordWarningIfChanged records a Warning event with reason and message only when changed is
