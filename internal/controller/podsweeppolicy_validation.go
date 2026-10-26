@@ -35,14 +35,18 @@ const (
 	reasonValidated                   = "Validated"
 	reasonInvalidMode                 = "InvalidMode"
 	reasonInvalidTTL                  = "InvalidTTL"
+	reasonInvalidNamespaceSelector    = "InvalidNamespaceSelector"
+	reasonInvalidPodSelector          = "InvalidPodSelector"
+	reasonNamespaceListFailed         = "NamespaceListFailed"
+	reasonNotReady                    = "NotReady"
 	reasonProtectedNamespacesExcluded = "ProtectedNamespacesExcluded"
 	reasonNoProtectedNamespaces       = "NoProtectedNamespaces"
 	reasonDisabled                    = "Disabled"
 )
 
-// ValidationSubReconciler validates spec.ttl/spec.mode, applies the operator-level
-// protected-namespace gate to spec.namespaceSelector, and sets status.conditions accordingly. It
-// implements reconciler.Reconciler.
+// ValidationSubReconciler validates spec.ttl, spec.mode, spec.namespaceSelector, and
+// spec.podSelector, applies the operator-level protected-namespace gate to spec.namespaceSelector,
+// and sets status.conditions accordingly. It implements reconciler.Reconciler.
 type ValidationSubReconciler struct {
 	Client              client.Client
 	Recorder            record.EventRecorder
@@ -69,11 +73,12 @@ func (r *ValidationSubReconciler) Name() string {
 	return "validation"
 }
 
-// Reconcile validates spec.ttl/spec.mode, applies the protected-namespace gate, and sets
-// status.conditions. The CRD schema already rejects a malformed or non-positive ttl and an
-// unknown mode at admission; the checks here are defense in depth for objects stored before
-// those rules existed. They fail fast (return an error) so the object's status reflects a clear
-// validation failure rather than silently no-op'ing.
+// Reconcile validates spec.ttl, spec.mode, and both selectors, applies the protected-namespace
+// gate, and sets status.conditions. The CRD schema already rejects a malformed or non-positive
+// ttl, an unknown mode, and a bad selector operator at admission; the checks here are defense in
+// depth for objects stored before those rules existed, and for selector errors CEL cannot see
+// (such as an invalid label value). Every failure path goes through failReady, so the object's
+// status reflects a clear validation failure rather than keeping a stale Ready=True.
 func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, error) {
 	mode := r.Policy.Spec.Mode
 	if mode == "" {
@@ -82,20 +87,22 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	if mode != sweeperv1alpha1.ModeEnforce && mode != sweeperv1alpha1.ModeReport && mode != sweeperv1alpha1.ModeDisable {
 		err := fmt.Errorf("invalid mode %q: must be one of %s, %s, %s", r.Policy.Spec.Mode,
 			sweeperv1alpha1.ModeEnforce, sweeperv1alpha1.ModeReport, sweeperv1alpha1.ModeDisable)
-		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonInvalidMode, err.Error())
-		if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
-			return ctrl.Result{}, errors.Join(err, statusErr)
-		}
-		return ctrl.Result{}, err
+		return r.failReady(ctx, reasonInvalidMode, err)
 	}
 
 	if r.Policy.Spec.TTL.Duration <= 0 {
 		err := fmt.Errorf("invalid ttl %q: must be greater than zero", r.Policy.Spec.TTL.Duration)
-		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonInvalidTTL, err.Error())
-		if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
-			return ctrl.Result{}, errors.Join(err, statusErr)
-		}
-		return ctrl.Result{}, err
+		return r.failReady(ctx, reasonInvalidTTL, err)
+	}
+
+	// Both selectors are parsed before the disable early return, like ttl and mode, so a disabled
+	// rule with a bad selector reports it before the mode changes. The parsed values are not kept:
+	// resolveNamespaceGate and EvaluationSubReconciler parse again where they use them.
+	if _, err := asSelector(r.Policy.Spec.NamespaceSelector); err != nil {
+		return r.failReady(ctx, reasonInvalidNamespaceSelector, fmt.Errorf("invalid spec.namespaceSelector: %w", err))
+	}
+	if _, err := asSelector(r.Policy.Spec.PodSelector); err != nil {
+		return r.failReady(ctx, reasonInvalidPodSelector, fmt.Errorf("invalid spec.podSelector: %w", err))
 	}
 
 	// disable means "not evaluated at all" (docs/ARCHITECTURE.md): no namespace listing, no
@@ -111,7 +118,7 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	_, skipped, err := resolveNamespaceGate(ctx, r.Client, r.Policy.Spec.NamespaceSelector,
 		r.ProtectedNamespaces, r.AllowedNamespaces)
 	if err != nil {
-		return ctrl.Result{}, err
+		return r.failReady(ctx, reasonNamespaceListFailed, fmt.Errorf("listing namespaces: %w", err))
 	}
 
 	var skippedChanged bool
@@ -127,7 +134,7 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	}
 
 	readyChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady,
-		metav1.ConditionTrue, reasonValidated, "spec.ttl and spec.mode are valid")
+		metav1.ConditionTrue, reasonValidated, "spec.ttl, spec.mode, spec.namespaceSelector and spec.podSelector are valid")
 
 	if err := writeStatusIfChanged(ctx, r.Client, r.Policy, skippedChanged || readyChanged); err != nil {
 		return ctrl.Result{}, err
@@ -140,4 +147,20 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 // ValidationSubReconciler owns no external state that needs cleanup.
 func (r *ValidationSubReconciler) Delete(_ context.Context) (ctrl.Result, error) {
 	return ctrl.Result{}, nil
+}
+
+// failReady sets Ready=False with reason and cause's message, sets Evaluated=False/NotReady
+// because the main reconciler stops the chain on the returned error and evaluation never runs,
+// records a Warning when Ready changed, writes status, and returns cause joined with any status
+// error so the object is requeued.
+func (r *ValidationSubReconciler) failReady(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
+	readyChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady,
+		metav1.ConditionFalse, reason, cause.Error())
+	evaluatedChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+		metav1.ConditionFalse, reasonNotReady, "rule is not evaluated while Ready is False")
+	recordWarningIfChanged(r.Recorder, r.Policy, readyChanged, reason, cause.Error())
+	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, readyChanged || evaluatedChanged); statusErr != nil {
+		return ctrl.Result{}, errors.Join(cause, statusErr)
+	}
+	return ctrl.Result{}, cause
 }

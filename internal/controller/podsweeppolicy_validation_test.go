@@ -91,6 +91,30 @@ func skippedCondition(policy *sweeperv1alpha1.PodSweepPolicy) *metav1.Condition 
 	return meta.FindStatusCondition(policy.Status.Conditions, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected)
 }
 
+func evaluatedCondition(policy *sweeperv1alpha1.PodSweepPolicy) *metav1.Condition {
+	return meta.FindStatusCondition(policy.Status.Conditions, sweeperv1alpha1.ConditionTypeEvaluated)
+}
+
+// badOperatorSelector is a selector the CRD schema used to accept but LabelSelectorAsSelector
+// rejects.
+func badOperatorSelector() *metav1.LabelSelector {
+	return &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "a", Operator: "Foo"}}}
+}
+
+// expectNotReady asserts the two conditions every validation failure path must leave behind.
+func expectNotReady(policy *sweeperv1alpha1.PodSweepPolicy, reason, messagePrefix string) {
+	GinkgoHelper()
+	ready := readyCondition(policy)
+	Expect(ready).NotTo(BeNil())
+	Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+	Expect(ready.Reason).To(Equal(reason))
+	Expect(ready.Message).To(HavePrefix(messagePrefix))
+	evaluated := evaluatedCondition(policy)
+	Expect(evaluated).NotTo(BeNil())
+	Expect(evaluated.Status).To(Equal(metav1.ConditionFalse))
+	Expect(evaluated.Reason).To(Equal(reasonNotReady))
+}
+
 var _ = Describe("ValidationSubReconciler", func() {
 	var (
 		ctx      context.Context
@@ -134,10 +158,8 @@ var _ = Describe("ValidationSubReconciler", func() {
 		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
 		Expect(err).To(HaveOccurred())
 
-		ready := readyCondition(policy)
-		Expect(ready).NotTo(BeNil())
-		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-		Expect(ready.Reason).To(Equal(reasonInvalidMode))
+		expectNotReady(policy, reasonInvalidMode, "invalid mode")
+		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidMode)))
 	})
 
 	It("fails fast on a non-positive ttl and sets Ready=False", func() {
@@ -150,10 +172,161 @@ var _ = Describe("ValidationSubReconciler", func() {
 		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
 		Expect(err).To(HaveOccurred())
 
+		expectNotReady(policy, reasonInvalidTTL, "invalid ttl")
+		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidTTL)))
+	})
+
+	It("fails fast on an invalid spec.namespaceSelector operator and sets Ready=False", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-ns-selector"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:               metav1.Duration{Duration: time.Hour},
+				NamespaceSelector: badOperatorSelector(),
+			},
+		}
+		cl := newValidationTestClient(policy)
+
+		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		expectNotReady(policy, reasonInvalidNamespaceSelector, "invalid spec.namespaceSelector: ")
+		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidNamespaceSelector)))
+	})
+
+	It("fails fast on an invalid spec.podSelector operator and sets Ready=False", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-pod-selector"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		// listErrorClient proves the namespace gate is never reached for a bad pod selector.
+		cl := &listErrorClient{Client: newValidationTestClient(policy)}
+
+		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		expectNotReady(policy, reasonInvalidPodSelector, "invalid spec.podSelector: ")
+		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidPodSelector)))
+	})
+
+	It("rejects a matchLabels value that is not a valid label value", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-label-value"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"a": "not valid"}},
+			},
+		}
+		cl := newValidationTestClient(policy)
+
+		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		expectNotReady(policy, reasonInvalidPodSelector, "invalid spec.podSelector: ")
+	})
+
+	It("reports an invalid selector even when mode is disable", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "disabled-bad-selector"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				Mode:        sweeperv1alpha1.ModeDisable,
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		cl := newValidationTestClient(policy)
+
+		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		expectNotReady(policy, reasonInvalidPodSelector, "invalid spec.podSelector: ")
+	})
+
+	It("sets Ready=False/NamespaceListFailed when listing namespaces fails", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "ns-list-fails"},
+			Spec:       sweeperv1alpha1.PodSweepPolicySpec{TTL: metav1.Duration{Duration: time.Hour}},
+		}
+		cl := &listErrorClient{Client: newValidationTestClient(policy)}
+
+		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		expectNotReady(policy, reasonNamespaceListFailed, "listing namespaces: ")
+		Expect(recorder.Events).To(Receive(ContainSubstring(reasonNamespaceListFailed)))
+	})
+
+	It("replaces a stale Ready=True when the selector becomes invalid", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "stale-ready", Generation: 2},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:               metav1.Duration{Duration: time.Hour},
+				NamespaceSelector: badOperatorSelector(),
+			},
+			Status: sweeperv1alpha1.PodSweepPolicyStatus{
+				ObservedGeneration: 1,
+				Conditions: []metav1.Condition{{
+					Type: sweeperv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue,
+					Reason: reasonValidated, ObservedGeneration: 1, LastTransitionTime: metav1.Now(),
+				}},
+			},
+		}
+		cl := newValidationTestClient(policy)
+
+		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		var fresh sweeperv1alpha1.PodSweepPolicy
+		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())
+		expectNotReady(&fresh, reasonInvalidNamespaceSelector, "invalid spec.namespaceSelector: ")
+		Expect(fresh.Status.ObservedGeneration).To(BeEquivalentTo(2))
+	})
+
+	It("restores Ready=True once the selector is fixed", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "fixed-selector"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		cl := newValidationTestClient(policy)
+		r := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
+
+		_, err := r.Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		policy.Spec.PodSelector = nil
+		_, err = r.Reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
 		ready := readyCondition(policy)
 		Expect(ready).NotTo(BeNil())
-		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-		Expect(ready.Reason).To(Equal(reasonInvalidTTL))
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready.Reason).To(Equal(reasonValidated))
+		// Evaluation owns the recovery of Evaluated; validation leaves NotReady in place.
+		Expect(evaluatedCondition(policy).Reason).To(Equal(reasonNotReady))
+	})
+
+	It("records one Warning for a repeated failure", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "repeat-failure"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		cl := newValidationTestClient(policy)
+		r := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
+
+		_, err := r.Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+		_, err = r.Reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		Expect(recorder.Events).To(HaveLen(1))
 	})
 
 	It("skips a protected namespace, sets the condition, and records a Warning event", func() {
