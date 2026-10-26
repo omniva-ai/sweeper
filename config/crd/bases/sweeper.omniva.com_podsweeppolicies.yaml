@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Evaluated")].status
+      name: Evaluated
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -109,6 +112,17 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: matchExpressions operator must be one of In, NotIn, Exists,
+                    DoesNotExist
+                  rule: '!has(self.matchExpressions) || self.matchExpressions.all(e,
+                    e.operator in [''In'', ''NotIn'', ''Exists'', ''DoesNotExist''])'
+                - message: matchExpressions values must be set for In and NotIn and
+                    empty for Exists and DoesNotExist
+                  rule: '!has(self.matchExpressions) || self.matchExpressions.all(e,
+                    !(e.operator in [''In'', ''NotIn'', ''Exists'', ''DoesNotExist''])
+                    || ((e.operator in [''In'', ''NotIn'']) ? (has(e.values) && size(e.values)
+                    > 0) : (!has(e.values) || size(e.values) == 0)))'
               podSelector:
                 description: |-
                   PodSelector selects the pods this rule applies to within matched namespaces. An empty or
@@ -157,6 +171,17 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: matchExpressions operator must be one of In, NotIn, Exists,
+                    DoesNotExist
+                  rule: '!has(self.matchExpressions) || self.matchExpressions.all(e,
+                    e.operator in [''In'', ''NotIn'', ''Exists'', ''DoesNotExist''])'
+                - message: matchExpressions values must be set for In and NotIn and
+                    empty for Exists and DoesNotExist
+                  rule: '!has(self.matchExpressions) || self.matchExpressions.all(e,
+                    !(e.operator in [''In'', ''NotIn'', ''Exists'', ''DoesNotExist''])
+                    || ((e.operator in [''In'', ''NotIn'']) ? (has(e.values) && size(e.values)
+                    > 0) : (!has(e.values) || size(e.values) == 0)))'
               ttl:
                 description: |-
                   TTL is how long a pod may sit in the Failed phase before it becomes eligible for deletion.
