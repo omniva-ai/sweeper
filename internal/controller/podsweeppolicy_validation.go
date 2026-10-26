@@ -22,8 +22,6 @@ import (
 	"fmt"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
@@ -84,8 +82,8 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	if mode != sweeperv1alpha1.ModeEnforce && mode != sweeperv1alpha1.ModeReport && mode != sweeperv1alpha1.ModeDisable {
 		err := fmt.Errorf("invalid mode %q: must be one of %s, %s, %s", r.Policy.Spec.Mode,
 			sweeperv1alpha1.ModeEnforce, sweeperv1alpha1.ModeReport, sweeperv1alpha1.ModeDisable)
-		changed := r.setReady(metav1.ConditionFalse, reasonInvalidMode, err.Error())
-		if statusErr := r.writeStatusIfChanged(ctx, changed); statusErr != nil {
+		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonInvalidMode, err.Error())
+		if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
 			return ctrl.Result{}, errors.Join(err, statusErr)
 		}
 		return ctrl.Result{}, err
@@ -93,8 +91,8 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 
 	if r.Policy.Spec.TTL.Duration <= 0 {
 		err := fmt.Errorf("invalid ttl %q: must be greater than zero", r.Policy.Spec.TTL.Duration)
-		changed := r.setReady(metav1.ConditionFalse, reasonInvalidTTL, err.Error())
-		if statusErr := r.writeStatusIfChanged(ctx, changed); statusErr != nil {
+		changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonInvalidTTL, err.Error())
+		if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
 			return ctrl.Result{}, errors.Join(err, statusErr)
 		}
 		return ctrl.Result{}, err
@@ -103,15 +101,11 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	// disable means "not evaluated at all" (docs/ARCHITECTURE.md): no namespace listing, no
 	// event, as if the rule didn't exist. Must be checked before resolveNamespaceGate.
 	if mode == sweeperv1alpha1.ModeDisable {
-		skippedChanged := meta.SetStatusCondition(&r.Policy.Status.Conditions, metav1.Condition{
-			Type:               sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
-			Status:             metav1.ConditionFalse,
-			Reason:             reasonDisabled,
-			Message:            "rule is disabled; namespaces are not evaluated",
-			ObservedGeneration: r.Policy.Generation,
-		})
-		readyChanged := r.setReady(metav1.ConditionTrue, reasonDisabled, "mode is disable; rule is not evaluated")
-		return ctrl.Result{}, r.writeStatusIfChanged(ctx, skippedChanged || readyChanged)
+		skippedChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
+			metav1.ConditionFalse, reasonDisabled, "rule is disabled; namespaces are not evaluated")
+		readyChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady,
+			metav1.ConditionTrue, reasonDisabled, "mode is disable; rule is not evaluated")
+		return ctrl.Result{}, writeStatusIfChanged(ctx, r.Client, r.Policy, skippedChanged || readyChanged)
 	}
 
 	_, skipped, err := resolveNamespaceGate(ctx, r.Client, r.Policy.Spec.NamespaceSelector,
@@ -124,29 +118,18 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	if len(skipped) > 0 {
 		message := fmt.Sprintf("namespaces excluded as protected and not explicitly allowed: %s",
 			strings.Join(skipped, ", "))
-		skippedChanged = meta.SetStatusCondition(&r.Policy.Status.Conditions, metav1.Condition{
-			Type:               sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
-			Status:             metav1.ConditionTrue,
-			Reason:             reasonProtectedNamespacesExcluded,
-			Message:            message,
-			ObservedGeneration: r.Policy.Generation,
-		})
-		if skippedChanged {
-			r.Recorder.Event(r.Policy, corev1.EventTypeWarning, reasonProtectedNamespacesExcluded, message)
-		}
+		skippedChanged = setCondition(r.Policy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
+			metav1.ConditionTrue, reasonProtectedNamespacesExcluded, message)
+		recordWarningIfChanged(r.Recorder, r.Policy, skippedChanged, reasonProtectedNamespacesExcluded, message)
 	} else {
-		skippedChanged = meta.SetStatusCondition(&r.Policy.Status.Conditions, metav1.Condition{
-			Type:               sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
-			Status:             metav1.ConditionFalse,
-			Reason:             reasonNoProtectedNamespaces,
-			Message:            "no matched namespaces are protected",
-			ObservedGeneration: r.Policy.Generation,
-		})
+		skippedChanged = setCondition(r.Policy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
+			metav1.ConditionFalse, reasonNoProtectedNamespaces, "no matched namespaces are protected")
 	}
 
-	readyChanged := r.setReady(metav1.ConditionTrue, reasonValidated, "spec.ttl and spec.mode are valid")
+	readyChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeReady,
+		metav1.ConditionTrue, reasonValidated, "spec.ttl and spec.mode are valid")
 
-	if err := r.writeStatusIfChanged(ctx, skippedChanged || readyChanged); err != nil {
+	if err := writeStatusIfChanged(ctx, r.Client, r.Policy, skippedChanged || readyChanged); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -157,29 +140,4 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 // ValidationSubReconciler owns no external state that needs cleanup.
 func (r *ValidationSubReconciler) Delete(_ context.Context) (ctrl.Result, error) {
 	return ctrl.Result{}, nil
-}
-
-func (r *ValidationSubReconciler) setReady(status metav1.ConditionStatus, reason, message string) bool {
-	return meta.SetStatusCondition(&r.Policy.Status.Conditions, metav1.Condition{
-		Type:               sweeperv1alpha1.ConditionTypeReady,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: r.Policy.Generation,
-	})
-}
-
-// writeStatusIfChanged writes status only if changed is true or the object's generation has
-// moved on since the last observed status, so a reconcile pass that leaves conditions
-// semantically unchanged doesn't bump resourceVersion and re-trigger the watch that invoked it.
-func (r *ValidationSubReconciler) writeStatusIfChanged(ctx context.Context, changed bool) error {
-	if !changed && r.Policy.Status.ObservedGeneration == r.Policy.Generation {
-		return nil
-	}
-	return r.updateStatus(ctx)
-}
-
-func (r *ValidationSubReconciler) updateStatus(ctx context.Context) error {
-	r.Policy.Status.ObservedGeneration = r.Policy.Generation
-	return r.Client.Status().Update(ctx, r.Policy)
 }
