@@ -47,9 +47,24 @@ status:
   conditions:
     - type: Ready
       status: "True"
+    - type: Evaluated
+      status: "True"
     - type: NamespacesSkippedProtected
       status: "False"
 ```
+
+#### Conditions
+
+| Condition | Set by | Reasons |
+| --- | --- | --- |
+| `Ready` | Validation | `Validated`, `Disabled`, `InvalidMode`, `InvalidTTL`, `InvalidNamespaceSelector`, `InvalidPodSelector`, `NamespaceListFailed` |
+| `Evaluated` | Evaluation (and Validation for `NotReady`) | `Evaluated`, `Disabled`, `NotReady`, `NamespaceListFailed`, `PodListFailed`, `DeleteFailed` |
+| `NamespacesSkippedProtected` | Validation | `ProtectedNamespacesExcluded`, `NoProtectedNamespaces`, `Disabled` |
+
+`Ready` answers "is the spec valid and can the controller act on it". `Evaluated` answers "did the
+last evaluation pass complete without error". A transition of either condition to `False` records
+one Warning event with the same reason, except `NotReady` and `Disabled`, which are not failures.
+`kubectl get podsweeppolicies` shows both as columns.
 
 ### Rule modes
 
@@ -153,18 +168,28 @@ sequenceDiagram
     Main-->>Mgr: ctrl.Result{RequeueAfter: jittered}, nil
 ```
 
-1. **`ValidationSubReconciler`** — resolves `spec.mode` (empty → `report`), applies the
-   protected-namespace gate to `spec.namespaceSelector`, and sets `status.conditions` accordingly.
-   The format of `spec.ttl` (a positive Go duration) and the `spec.mode` enum are enforced by the
-   CRD schema at admission time; the `ttl` rules use CEL validation, which needs Kubernetes 1.25 or
-   later. The sub-reconciler re-checks `ttl > 0` and the `mode` value as defense in depth for
-   objects stored before the schema rules existed; on failure it sets `Ready=False` with reason
-   `InvalidTTL` or `InvalidMode` and returns an error so the object is requeued rather than
-   silently no-op'ing.
+1. **`ValidationSubReconciler`** — resolves `spec.mode` (empty → `report`), parses
+   `spec.namespaceSelector` and `spec.podSelector`, applies the protected-namespace gate to
+   `spec.namespaceSelector`, and sets `status.conditions` accordingly. The format of `spec.ttl` (a
+   positive Go duration), the `spec.mode` enum, and the `matchExpressions` operator and values
+   arity of both selectors are enforced by the CRD schema at admission time; the `ttl` and selector
+   rules use CEL validation, which needs Kubernetes 1.25 or later. The sub-reconciler re-checks
+   `ttl > 0`, the `mode` value, and both selectors as defense in depth for objects stored before
+   the schema rules existed and for selector errors CEL cannot see (such as an invalid label
+   value). The selector checks run before the `disable` early return, so a disabled rule with a
+   bad selector is reported too. On failure it sets `Ready=False` with reason `InvalidTTL`,
+   `InvalidMode`, `InvalidNamespaceSelector`, `InvalidPodSelector`, or `NamespaceListFailed` (when
+   the namespace List itself fails), sets `Evaluated=False/NotReady` because the chain stops here,
+   records a Warning event on the transition, and returns an error so the object is requeued
+   rather than silently keeping a stale `Ready=True`.
 2. **`EvaluationSubReconciler`** — for the resolved (post-protected-namespace-gate) namespace and
    pod selectors: lists `Failed`-phase pods, computes failed-since + TTL-eligibility for each,
    updates the "currently identified" gauge, and — only when `mode == enforce` — deletes eligible
-   pods and increments the deletion counter. It also implements `Watcher`, registering a watch on
+   pods and increments the deletion counter. It records the outcome in the `Evaluated` condition:
+   `True/Evaluated` after a clean pass, `False` with `NamespaceListFailed`, `PodListFailed`, or
+   `DeleteFailed` (and the error as the message) when a call fails, and `False/Disabled` in
+   `disable` mode; a transition to a failure reason records one Warning event. The returned error
+   and requeue behaviour do not change. It also implements `Watcher`, registering a watch on
    `v1.Pod` (filtered to `phase == Failed` transitions) mapped back to every `PodSweepPolicy`
    whose selectors could match it, via a controller-runtime field index, so a pod entering
    `Failed` triggers re-evaluation without waiting for the next poll.
