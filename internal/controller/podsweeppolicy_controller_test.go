@@ -26,10 +26,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 	"github.com/omniva-ai/sweeper/internal/metrics"
@@ -198,5 +200,100 @@ var _ = Describe("PodSweepPolicyReconciler", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(cl.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &corev1.Pod{})).To(Succeed())
+
+		var fresh sweeperv1alpha1.PodSweepPolicy
+		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionTrue, reasonValidated)
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionTrue, reasonEvaluated)
+	})
+
+	It("flips a stale Ready=True to False when spec.namespaceSelector is invalid", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "stale-chain", Finalizers: []string{finalizerName}, Generation: 2},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:               metav1.Duration{Duration: time.Minute},
+				NamespaceSelector: badOperatorSelector(),
+			},
+			Status: sweeperv1alpha1.PodSweepPolicyStatus{
+				ObservedGeneration: 1,
+				Conditions: []metav1.Condition{
+					{Type: sweeperv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue,
+						Reason: reasonValidated, ObservedGeneration: 1, LastTransitionTime: metav1.Now()},
+					{Type: sweeperv1alpha1.ConditionTypeEvaluated, Status: metav1.ConditionTrue,
+						Reason: reasonEvaluated, ObservedGeneration: 1, LastTransitionTime: metav1.Now()},
+				},
+			},
+		}
+		cl := newValidationTestClient(policy)
+
+		reconciler := &PodSweepPolicyReconciler{Client: cl, Recorder: record.NewFakeRecorder(10)}
+		req = ctrl.Request{NamespacedName: types.NamespacedName{Name: policy.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+
+		var fresh sweeperv1alpha1.PodSweepPolicy
+		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonInvalidNamespaceSelector)
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionFalse, reasonNotReady)
+		Expect(fresh.Status.ObservedGeneration).To(BeEquivalentTo(2))
+	})
+
+	It("sets Ready=True/Disabled and Evaluated=False/Disabled without an event in disable mode", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "disabled-chain", Finalizers: []string{finalizerName}},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:  metav1.Duration{Duration: time.Minute},
+				Mode: sweeperv1alpha1.ModeDisable,
+			},
+		}
+		DeferCleanup(func() { metrics.DeletePolicy(policy.Name) })
+		cl := newValidationTestClient(policy)
+		recorder := record.NewFakeRecorder(10)
+
+		reconciler := &PodSweepPolicyReconciler{Client: cl, Recorder: recorder}
+		req = ctrl.Request{NamespacedName: types.NamespacedName{Name: policy.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		var fresh sweeperv1alpha1.PodSweepPolicy
+		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionTrue, reasonDisabled)
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionFalse, reasonDisabled)
+		Consistently(recorder.Events).ShouldNot(Receive())
+	})
+
+	It("persists Evaluated=False/PodListFailed through the full chain when listing pods fails", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "podlist-chain", Finalizers: []string{finalizerName}},
+			Spec:       sweeperv1alpha1.PodSweepPolicySpec{TTL: metav1.Duration{Duration: time.Minute}},
+		}
+		DeferCleanup(func() { metrics.DeletePolicy(policy.Name) })
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
+		cl := &listErrorForClient{Client: newValidationTestClient(policy, ns), failFor: &corev1.PodList{}}
+		recorder := record.NewFakeRecorder(10)
+
+		reconciler := &PodSweepPolicyReconciler{Client: cl, Recorder: recorder}
+		req = ctrl.Request{NamespacedName: types.NamespacedName{Name: policy.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+
+		var fresh sweeperv1alpha1.PodSweepPolicy
+		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionTrue, reasonValidated)
+		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionFalse, reasonPodListFailed)
+		Expect(recorder.Events).To(Receive(ContainSubstring(reasonPodListFailed)))
 	})
 })
+
+// expectCondition asserts one condition's status and reason on a policy read back from the
+// client, so the specs above prove the status write, not only the in-memory object.
+func expectCondition(policy *sweeperv1alpha1.PodSweepPolicy, condType string, status metav1.ConditionStatus, reason string) {
+	GinkgoHelper()
+	cond := meta.FindStatusCondition(policy.Status.Conditions, condType)
+	Expect(cond).NotTo(BeNil(), "condition %s is missing", condType)
+	Expect(cond.Status).To(Equal(status))
+	Expect(cond.Reason).To(Equal(reason))
+}
