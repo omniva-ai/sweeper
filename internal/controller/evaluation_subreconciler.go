@@ -117,7 +117,7 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 			return ctrl.Result{}, r.failEvaluated(ctx, reasonPodListFailed, fmt.Errorf("listing pods in namespace %s: %w", ns, err))
 		}
 		for i := range podList.Items {
-			if podList.Items[i].Status.Phase == corev1.PodFailed {
+			if podList.Items[i].Status.Phase == corev1.PodFailed && podList.Items[i].DeletionTimestamp == nil {
 				candidates = append(candidates, podList.Items[i])
 			}
 		}
@@ -143,8 +143,9 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	if r.Policy.Spec.Mode == sweeperv1alpha1.ModeEnforce {
 		for i := range eligible {
 			pod := &eligible[i]
-			if err := r.Client.Delete(ctx, pod); err != nil {
-				if !apierrors.IsNotFound(err) {
+			if err := r.Client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID}); err != nil {
+				// With only a UID precondition, Conflict means a new pod now has this name.
+				if !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 					deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting pod %s/%s: %w", pod.Namespace, pod.Name, err))
 				}
 				continue

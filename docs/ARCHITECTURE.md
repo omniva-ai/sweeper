@@ -86,9 +86,11 @@ Mode semantics are deliberately explicit, since this is the easiest thing to get
 
 ### Identifying "evicted/failed" pods
 
-A pod is a candidate if `pod.Status.Phase == v1.PodFailed`. This phase covers both kubelet
-eviction (`pod.Status.Reason == "Evicted"`) and other terminal container failures under
-`restartPolicy: Never`.
+A pod is a candidate if `pod.Status.Phase == v1.PodFailed` and it is not terminating
+(`metadata.deletionTimestamp` is unset). This phase covers both kubelet eviction
+(`pod.Status.Reason == "Evicted"`) and other terminal container failures under
+`restartPolicy: Never`. A Failed pod that a finalizer holds (for example the Job tracking
+finalizer) is already being deleted, so it is not sweeper's work and is not a candidate.
 
 There is no single authoritative field for "when did this pod become Failed", so the "failed
 since" timestamp is computed with this fallback order:
@@ -183,9 +185,13 @@ sequenceDiagram
    records a Warning event on the transition, and returns an error so the object is requeued
    rather than silently keeping a stale `Ready=True`.
 2. **`EvaluationSubReconciler`** — for the resolved (post-protected-namespace-gate) namespace and
-   pod selectors: lists `Failed`-phase pods, computes failed-since + TTL-eligibility for each,
-   updates the "currently identified" gauge, and — only when `mode == enforce` — deletes eligible
-   pods and increments the deletion counter. It records the outcome in the `Evaluated` condition:
+   pod selectors: lists `Failed`-phase pods that are not terminating, computes failed-since +
+   TTL-eligibility for each, updates the "currently identified" gauge, and — only when
+   `mode == enforce` — deletes eligible pods and increments the deletion counter. Each delete
+   carries a UID precondition (`client.Preconditions{UID: &pod.UID}`, no ResourceVersion), so a
+   pod that was recreated with the same name after the cache read is never deleted. A `NotFound`
+   or `Conflict` (the UID precondition failed) on delete means the evaluated pod is already gone:
+   it is skipped, not counted, and does not fail the pass. It records the outcome in the `Evaluated` condition:
    `True/Evaluated` after a clean pass, `False` with `NamespaceListFailed`, `PodListFailed`, or
    `DeleteFailed` (and the error as the message) when a call fails, and `False/Disabled` in
    `disable` mode; a transition to a failure reason records one Warning event. The returned error
@@ -222,10 +228,11 @@ errors, workqueue depth — ship for free).
 Custom metrics, both labeled by `namespace` and `policy` (the owning `PodSweepPolicy` name):
 
 - `sweeper_evicted_failed_pods_current` (Gauge) — currently identified candidates at last
-  evaluation. Updated by `EvaluationSubReconciler` regardless of mode, **including `report`** —
+  evaluation. Terminating pods are not candidates, so they are not counted. Updated by `EvaluationSubReconciler` regardless of mode, **including `report`** —
   this is the metric an operator watches before flipping a rule to `enforce`.
-- `sweeper_pods_deleted_total` (Counter) — cumulative deletions. Only incremented in `enforce`
-  mode.
+- `sweeper_pods_deleted_total` (Counter) — cumulative successful delete calls. Only incremented
+  in `enforce` mode. A pod that the cache already shows as terminating is not deleted or counted
+  again, but a delete can repeat while the cache has not yet seen the pod's `deletionTimestamp`.
 
 ## Invariants
 
