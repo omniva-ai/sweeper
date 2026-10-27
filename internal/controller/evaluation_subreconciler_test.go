@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 	"github.com/omniva-ai/sweeper/internal/jitter"
@@ -50,6 +51,17 @@ import (
 // plain testing.T tests in this package can run before it does.
 func newFakeClientForEval(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
+	return newFakeClientBuilderForEval(t, objs...).Build()
+}
+
+// newInterceptedClientForEval is newFakeClientForEval with funcs wrapped around the fake client.
+func newInterceptedClientForEval(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) client.Client {
+	t.Helper()
+	return newFakeClientBuilderForEval(t, objs...).WithInterceptorFuncs(funcs).Build()
+}
+
+func newFakeClientBuilderForEval(t *testing.T, objs ...client.Object) *fake.ClientBuilder {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding corev1 to scheme: %v", err)
@@ -60,8 +72,7 @@ func newFakeClientForEval(t *testing.T, objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&sweeperv1alpha1.PodSweepPolicy{}).
-		WithObjects(objs...).
-		Build()
+		WithObjects(objs...)
 }
 
 func TestFailedSince(t *testing.T) {
@@ -210,7 +221,7 @@ const (
 
 func failedPod(name string, failedMinutesAgo time.Duration, now time.Time) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, UID: types.UID(name + "-uid")},
 		Status: corev1.PodStatus{
 			Phase:     corev1.PodFailed,
 			StartTime: ptrTime(now.Add(-failedMinutesAgo)),
@@ -840,5 +851,140 @@ func TestEvaluationSubReconcilerConditions(t *testing.T) {
 			t.Fatalf("Reconcile() error = %v", err)
 		}
 		expectEvaluated(t, policy, metav1.ConditionTrue, reasonEvaluated)
+	})
+}
+
+func TestEvaluationSubReconcilerDeletePreconditions(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ttl := 10 * time.Minute
+	noProtected := sets.New[string]()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
+
+	t.Run("delete carries the pod UID", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
+		pod := failedPod(testStalePodName, 11*time.Minute, now)
+		var got []client.DeleteOptions
+		c := newInterceptedClientForEval(t, interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				got = append(got, *(&client.DeleteOptions{}).ApplyOptions(opts))
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}, ns, pod, policy)
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r.Now = func() time.Time { return now }
+
+		if _, err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("Delete calls = %d, want 1", len(got))
+		}
+		pre := got[0].Preconditions
+		if pre == nil || pre.UID == nil {
+			t.Fatalf("Preconditions = %+v, want a UID precondition", pre)
+		}
+		if *pre.UID != pod.UID {
+			t.Errorf("Preconditions.UID = %q, want %q", *pre.UID, pod.UID)
+		}
+		if pre.ResourceVersion != nil {
+			t.Errorf("Preconditions.ResourceVersion = %q, want nil", *pre.ResourceVersion)
+		}
+		if err := c.Get(context.Background(), types.NamespacedName{Name: testStalePodName, Namespace: testNamespace}, &corev1.Pod{}); !errors.IsNotFound(err) {
+			t.Errorf("expected pod to be deleted, got error: %v", err)
+		}
+	})
+
+	t.Run("conflict on a recreated pod is skipped", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
+		pod := failedPod(testStalePodName, 11*time.Minute, now)
+		c := newInterceptedClientForEval(t, interceptor.Funcs{
+			Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
+				return errors.NewConflict(corev1.Resource("pods"), obj.GetName(),
+					fmt.Errorf("precondition failed: UID in precondition"))
+			},
+		}, ns, pod, policy)
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+
+		recorder := record.NewFakeRecorder(10)
+		r := NewEvaluationSubReconciler(c, recorder, policy, noProtected, noProtected)
+		r.Now = func() time.Time { return now }
+
+		if _, err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		expectEvaluated(t, policy, metav1.ConditionTrue, reasonEvaluated)
+		if counter := testutil.ToFloat64(metrics.DeletedTotal.WithLabelValues(testNamespace, policy.Name)); counter != 0 {
+			t.Errorf("DeletedTotal = %v, want 0", counter)
+		}
+		if got := len(recorder.Events); got != 0 {
+			t.Errorf("events = %d, want 0", got)
+		}
+	})
+}
+
+func terminatingFailedPod(name string, failedMinutesAgo time.Duration, now time.Time) *corev1.Pod {
+	pod := failedPod(name, failedMinutesAgo, now)
+	pod.Finalizers = []string{"example.com/hold"}
+	pod.DeletionTimestamp = ptrTime(now)
+	return pod
+}
+
+func TestEvaluationSubReconcilerTerminatingPods(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ttl := 10 * time.Minute
+	noProtected := sets.New[string]()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
+	const terminatingPodName = "terminating"
+
+	t.Run("enforce", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
+		terminating := terminatingFailedPod(terminatingPodName, 11*time.Minute, now)
+		stale := failedPod(testStalePodName, 11*time.Minute, now)
+		deletes := map[string]int{}
+		c := newInterceptedClientForEval(t, interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				deletes[obj.GetName()]++
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}, ns, terminating, stale, policy)
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r.Now = func() time.Time { return now }
+
+		for i := 0; i < 2; i++ {
+			if _, err := r.Reconcile(context.Background()); err != nil {
+				t.Fatalf("Reconcile() #%d error = %v", i+1, err)
+			}
+		}
+		if got := deletes[terminatingPodName]; got != 0 {
+			t.Errorf("Delete calls for the terminating pod = %d, want 0", got)
+		}
+		if counter := testutil.ToFloat64(metrics.DeletedTotal.WithLabelValues(testNamespace, policy.Name)); counter != 1 {
+			t.Errorf("DeletedTotal = %v, want 1 (only the non-terminating pod)", counter)
+		}
+		if gauge := testutil.ToFloat64(metrics.CurrentGauge.WithLabelValues(testNamespace, policy.Name)); gauge != 0 {
+			t.Errorf("CurrentGauge = %v, want 0", gauge)
+		}
+	})
+
+	t.Run("report", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeReport)
+		terminating := terminatingFailedPod(terminatingPodName, 11*time.Minute, now)
+		stale := failedPod(testStalePodName, 11*time.Minute, now)
+		c := newFakeClientForEval(t, ns, terminating, stale, policy)
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r.Now = func() time.Time { return now }
+
+		if _, err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if gauge := testutil.ToFloat64(metrics.CurrentGauge.WithLabelValues(testNamespace, policy.Name)); gauge != 1 {
+			t.Errorf("CurrentGauge = %v, want 1 (the terminating pod is not a candidate)", gauge)
+		}
 	})
 }
