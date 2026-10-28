@@ -176,8 +176,8 @@ func (r *EvaluationSubReconciler) failEvaluated(ctx context.Context, reason stri
 	return writeFailure(ctx, r.Client, r.Policy, changed, cause)
 }
 
-// Delete implements reconciler.Reconciler. It is a no-op: EvaluationSubReconciler owns no
-// finalizer-managed external state, and per the architecture's invariant, deleting a
+// Delete implements reconciler.Reconciler. It purges the policy's metric series via
+// metrics.DeletePolicy and never deletes pods: per the architecture's invariant, deleting a
 // PodSweepPolicy must never cascade into deleting the pods it was evaluating.
 func (r *EvaluationSubReconciler) Delete(_ context.Context) (ctrl.Result, error) {
 	metrics.DeletePolicy(r.Policy.Name)
