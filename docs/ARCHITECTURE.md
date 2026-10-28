@@ -149,11 +149,13 @@ The main controller's `Reconcile` is keyed on `PodSweepPolicy`. It manages the f
 the reconcile returns immediately, resuming on the `Update`-triggered requeue) before any
 sub-reconciler runs. This guarantees `Delete` actually gets a chance to run cleanup — without a
 finalizer, the API server could remove a `PodSweepPolicy` before any reconcile observes a live
-`DeletionTimestamp`. On every subsequent call it walks an ordered list of sub-reconcilers, calling
-`Reconcile` on each in turn (or `Delete` on all of them, instead, when the `PodSweepPolicy` has a
-deletion timestamp), stopping at the first error or the first non-zero `ctrl.Result`; once the
-`deleting` pass completes cleanly, the finalizer is removed so the object can actually be
-deleted:
+`DeletionTimestamp`. Because only the controller removes the finalizer, the controller must
+outlive the policies: uninstall deletes the policies first, otherwise they and the CRD stay in
+`Terminating` (see [Uninstall](../README.md#uninstall)). On every subsequent call `Reconcile`
+walks an ordered list of sub-reconcilers, calling `Reconcile` on each in turn (or `Delete` on all
+of them, instead, when the `PodSweepPolicy` has a deletion timestamp), stopping at the first error
+or the first non-zero `ctrl.Result`; once the `deleting` pass completes cleanly, the finalizer is
+removed so the object can actually be deleted:
 
 ```mermaid
 sequenceDiagram

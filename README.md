@@ -59,6 +59,31 @@ cosign verify ghcr.io/omniva-ai/sweeper:v0.1.0 \
 Use the same command with `ghcr.io/omniva-ai/sweeper-manifests:<version>` to verify the
 manifests artifact.
 
+## Uninstall
+
+Delete the policies first, while the controller is still running. Every PodSweepPolicy carries
+the `sweeper.omniva.com/finalizer` finalizer, and only the controller can remove it:
+
+```
+kubectl delete podsweeppolicies --all
+```
+
+Then remove the release manifests:
+
+```
+kubectl delete -f https://github.com/omniva-ai/sweeper/releases/latest/download/install.yaml
+```
+
+For a deploy from source, `make undeploy` does the first step for you.
+
+If the controller was removed first, the policies (and the CRD) stay in `Terminating`. To
+recover, remove sweeper's finalizer from every policy while keeping any finalizer owned by
+another controller. This needs [`jq`](https://jqlang.org/):
+
+```
+kubectl get podsweeppolicies -o json | jq '.items[].metadata.finalizers |= map(select(. != "sweeper.omniva.com/finalizer"))' | kubectl replace -f -
+```
+
 ## Protected namespaces
 
 Namespaces on the operator-level protected list are never evaluated, whatever a
