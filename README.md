@@ -81,7 +81,7 @@ recover, remove sweeper's finalizer from every policy while keeping any finalize
 another controller. This needs [`jq`](https://jqlang.org/):
 
 ```
-kubectl get podsweeppolicies -o json | jq '.items[].metadata.finalizers |= map(select(. != "sweeper.omniva.com/finalizer"))' | kubectl replace -f -
+kubectl get podsweeppolicies -o json | jq '.items[].metadata.finalizers |= ((. // []) | map(select(. != "sweeper.omniva.com/finalizer")))' | kubectl replace -f -
 ```
 
 ## Protected namespaces
