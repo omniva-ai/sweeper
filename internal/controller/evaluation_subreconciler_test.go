@@ -76,70 +76,206 @@ func newFakeClientBuilderForEval(t *testing.T, objs ...client.Object) *fake.Clie
 }
 
 func TestFailedSince(t *testing.T) {
-	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	started := created.Add(1 * time.Minute)
-	finishedEarly := started.Add(2 * time.Minute)
-	finishedLate := started.Add(5 * time.Minute)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	firstSeen := now.Add(-10 * time.Minute)
+	weeksAgo := now.Add(-21 * 24 * time.Hour)
+	early := now.Add(-50 * time.Minute)
+	late := now.Add(-30 * time.Minute)
+
+	terminated := func(name string, at time.Time) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{FinishedAt: metav1.NewTime(at)},
+		}}
+	}
+	running := func(name string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	}
+	cond := func(condType corev1.PodConditionType, status corev1.ConditionStatus, at time.Time) corev1.PodCondition {
+		return corev1.PodCondition{Type: condType, Status: status, LastTransitionTime: metav1.NewTime(at)}
+	}
+	pod := func(containers []string, status corev1.PodStatus) corev1.Pod {
+		p := corev1.Pod{Status: status}
+		for _, name := range containers {
+			p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: name})
+		}
+		return p
+	}
+	single := []string{testMainContainer}
+	pair := []string{"a", "b"}
 
 	tests := map[string]struct {
 		pod  corev1.Pod
 		want time.Time
 	}{
 		"single terminated container uses finishedAt": {
-			pod: corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
-				Status: corev1.PodStatus{
-					StartTime: ptrTime(started),
-					ContainerStatuses: []corev1.ContainerStatus{
-						{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-							FinishedAt: metav1.NewTime(finishedEarly),
-						}}},
-					},
-				},
-			},
-			want: finishedEarly,
+			pod:  pod(single, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)}}),
+			want: early,
 		},
 		"multiple terminated containers use max finishedAt": {
-			pod: corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
-				Status: corev1.PodStatus{
-					StartTime: ptrTime(started),
-					ContainerStatuses: []corev1.ContainerStatus{
-						{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-							FinishedAt: metav1.NewTime(finishedEarly),
-						}}},
-						{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-							FinishedAt: metav1.NewTime(finishedLate),
-						}}},
-					},
-				},
-			},
-			want: finishedLate,
+			pod: pod(pair, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+				terminated("a", early), terminated("b", late),
+			}}),
+			want: late,
 		},
-		"no terminated containers falls back to StartTime": {
-			pod: corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
-				Status: corev1.PodStatus{
-					StartTime: ptrTime(started),
-					ContainerStatuses: []corev1.ContainerStatus{
-						{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}},
-					},
-				},
-			},
-			want: started,
+		"all main containers terminated explained": {
+			pod:  pod(single, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, weeksAgo)}}),
+			want: weeksAgo,
 		},
-		"no StartTime falls back to CreationTimestamp": {
+		"container in spec without a status not explained": {
+			pod:  pod(pair, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{terminated("a", weeksAgo)}}),
+			want: firstSeen,
+		},
+		"terminated container with unset finishedAt not explained": {
+			pod: pod(pair, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+				terminated("a", weeksAgo), terminated("b", time.Time{}),
+			}}),
+			want: firstSeen,
+		},
+		"stale sibling container not explained": {
+			pod: pod(pair, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+				terminated("a", weeksAgo), running("b"),
+			}}),
+			want: firstSeen,
+		},
+		"stale init container not explained": {
+			pod: pod(single, corev1.PodStatus{
+				InitContainerStatuses: []corev1.ContainerStatus{terminated("init", weeksAgo)},
+				ContainerStatuses:     []corev1.ContainerStatus{running(testMainContainer)},
+			}),
+			want: firstSeen,
+		},
+		"stale ready false not explained": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.PodReady, corev1.ConditionFalse, weeksAgo)},
+				ContainerStatuses: []corev1.ContainerStatus{running(testMainContainer)},
+			}),
+			want: firstSeen,
+		},
+		"disruption target explained": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.DisruptionTarget, corev1.ConditionTrue, early)},
+				ContainerStatuses: []corev1.ContainerStatus{running(testMainContainer)},
+			}),
+			want: early,
+		},
+		"disruption target with unset lastTransitionTime not explained": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.DisruptionTarget, corev1.ConditionTrue, time.Time{})},
+				ContainerStatuses: []corev1.ContainerStatus{running(testMainContainer)},
+			}),
+			want: firstSeen,
+		},
+		"init container terminated is a candidate": {
+			pod: pod(single, corev1.PodStatus{
+				InitContainerStatuses: []corev1.ContainerStatus{terminated("init", now.Add(-time.Minute))},
+				ContainerStatuses:     []corev1.ContainerStatus{running(testMainContainer)},
+			}),
+			want: now.Add(-time.Minute),
+		},
+		"init and main containers latest wins": {
+			pod: pod(single, corev1.PodStatus{
+				InitContainerStatuses: []corev1.ContainerStatus{terminated("init", late)},
+				ContainerStatuses:     []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: late,
+		},
+		"ready false condition is a candidate": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.PodReady, corev1.ConditionFalse, late)},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: late,
+		},
+		"containers ready false condition is a candidate": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.ContainersReady, corev1.ConditionFalse, late)},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: late,
+		},
+		"disruption target condition is a candidate": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.DisruptionTarget, corev1.ConditionTrue, late)},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: late,
+		},
+		"condition with wrong status ignored": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					cond(corev1.PodReady, corev1.ConditionTrue, late),
+					cond(corev1.ContainersReady, corev1.ConditionTrue, late),
+					cond(corev1.DisruptionTarget, corev1.ConditionFalse, late),
+				},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: early,
+		},
+		"unrelated conditions ignored": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					cond(corev1.PodScheduled, corev1.ConditionTrue, late),
+					cond(corev1.PodInitialized, corev1.ConditionTrue, late),
+					cond(corev1.PodReadyToStartContainers, corev1.ConditionFalse, late),
+				},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: early,
+		},
+		"mixed candidates condition later than finishedAt": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.PodReady, corev1.ConditionFalse, late)},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, early)},
+			}),
+			want: late,
+		},
+		"mixed candidates finishedAt later than condition": {
+			pod: pod(single, corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{cond(corev1.PodReady, corev1.ConditionFalse, early)},
+				ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, late)},
+			}),
+			want: late,
+		},
+		"future finishedAt capped at now": {
+			pod:  pod(single, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{terminated(testMainContainer, now.Add(time.Hour))}}),
+			want: now,
+		},
+		"ephemeral container ignored": {
+			pod: pod(single, corev1.PodStatus{
+				ContainerStatuses:          []corev1.ContainerStatus{terminated(testMainContainer, early)},
+				EphemeralContainerStatuses: []corev1.ContainerStatus{terminated("debug", late)},
+			}),
+			want: early,
+		},
+		"last termination state ignored": {
+			pod: pod(single, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: testMainContainer,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					FinishedAt: metav1.NewTime(early),
+				}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					FinishedAt: metav1.NewTime(late),
+				}},
+			}}}),
+			want: early,
+		},
+		"no candidates uses first seen": {
+			pod:  pod(single, corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{running(testMainContainer)}}),
+			want: firstSeen,
+		},
+		"start time ignored": {
 			pod: corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
-				Status:     corev1.PodStatus{},
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(weeksAgo)},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: testMainContainer}}},
+				Status:     corev1.PodStatus{StartTime: ptrTime(weeksAgo)},
 			},
-			want: created,
+			want: firstSeen,
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			got := failedSince(&tc.pod)
+			got := failedSince(&tc.pod, firstSeen, now)
 			if !got.Equal(tc.want) {
 				t.Errorf("failedSince() = %v, want %v", got, tc.want)
 			}
@@ -152,8 +288,25 @@ func ptrTime(t time.Time) *metav1.Time {
 	return &mt
 }
 
+// podFailedAt returns a pod whose only container terminated at t, so its failure is explained
+// and the first-seen time never changes the result.
 func podFailedAt(t time.Time) corev1.Pod {
-	return corev1.Pod{Status: corev1.PodStatus{StartTime: ptrTime(t)}}
+	return corev1.Pod{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: testMainContainer}}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: testMainContainer, State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{FinishedAt: metav1.NewTime(t)},
+			}}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: metav1.NewTime(t)},
+			},
+		},
+	}
+}
+
+func seenNow(now time.Time) func(*corev1.Pod) time.Time {
+	return func(*corev1.Pod) time.Time { return now }
 }
 
 func TestEvaluate(t *testing.T) {
@@ -163,7 +316,7 @@ func TestEvaluate(t *testing.T) {
 
 	t.Run("pod past TTL is eligible", func(t *testing.T) {
 		pods := []corev1.Pod{podFailedAt(now.Add(-11 * time.Minute))}
-		eligible, _ := evaluate(pods, ttl, now, defaultPollInterval)
+		eligible, _ := evaluate(pods, ttl, now, defaultPollInterval, seenNow(now))
 		if len(eligible) != 1 {
 			t.Fatalf("eligible = %d pods, want 1", len(eligible))
 		}
@@ -171,7 +324,7 @@ func TestEvaluate(t *testing.T) {
 
 	t.Run("pod not yet past TTL is not eligible", func(t *testing.T) {
 		pods := []corev1.Pod{podFailedAt(now.Add(-5 * time.Minute))}
-		eligible, _ := evaluate(pods, ttl, now, defaultPollInterval)
+		eligible, _ := evaluate(pods, ttl, now, defaultPollInterval, seenNow(now))
 		if len(eligible) != 0 {
 			t.Fatalf("eligible = %d pods, want 0", len(eligible))
 		}
@@ -179,7 +332,7 @@ func TestEvaluate(t *testing.T) {
 
 	t.Run("requeue is time until nearest TTL expiry when sooner than default poll", func(t *testing.T) {
 		pods := []corev1.Pod{podFailedAt(now.Add(-8 * time.Minute))} // 2m until eligible
-		_, requeueAfter := evaluate(pods, ttl, now, defaultPollInterval)
+		_, requeueAfter := evaluate(pods, ttl, now, defaultPollInterval, seenNow(now))
 		if requeueAfter != 2*time.Minute {
 			t.Errorf("requeueAfter = %v, want %v", requeueAfter, 2*time.Minute)
 		}
@@ -187,14 +340,14 @@ func TestEvaluate(t *testing.T) {
 
 	t.Run("requeue falls back to default poll interval when no pod expires sooner", func(t *testing.T) {
 		pods := []corev1.Pod{podFailedAt(now.Add(-1 * time.Minute))} // 9m until eligible, past defaultPollInterval
-		_, requeueAfter := evaluate(pods, ttl, now, defaultPollInterval)
+		_, requeueAfter := evaluate(pods, ttl, now, defaultPollInterval, seenNow(now))
 		if requeueAfter != defaultPollInterval {
 			t.Errorf("requeueAfter = %v, want %v", requeueAfter, defaultPollInterval)
 		}
 	})
 
 	t.Run("requeue with no pods falls back to default poll interval", func(t *testing.T) {
-		_, requeueAfter := evaluate(nil, ttl, now, defaultPollInterval)
+		_, requeueAfter := evaluate(nil, ttl, now, defaultPollInterval, seenNow(now))
 		if requeueAfter != defaultPollInterval {
 			t.Errorf("requeueAfter = %v, want %v", requeueAfter, defaultPollInterval)
 		}
@@ -202,7 +355,7 @@ func TestEvaluate(t *testing.T) {
 
 	t.Run("eligible pods are excluded from requeue calculation", func(t *testing.T) {
 		pods := []corev1.Pod{podFailedAt(now.Add(-11 * time.Minute))} // already eligible
-		_, requeueAfter := evaluate(pods, ttl, now, defaultPollInterval)
+		_, requeueAfter := evaluate(pods, ttl, now, defaultPollInterval, seenNow(now))
 		if requeueAfter != defaultPollInterval {
 			t.Errorf("requeueAfter = %v, want %v", requeueAfter, defaultPollInterval)
 		}
@@ -210,23 +363,20 @@ func TestEvaluate(t *testing.T) {
 }
 
 const (
-	testNamespace    = "default"
-	testStalePodName = "stale"
-	testFreshPodName = "fresh"
-	testSomePodName  = "some-pod"
-	envLabelKey      = "env"
-	tierLabelKey     = "tier"
-	tierValueBatch   = "batch"
+	testNamespace     = "default"
+	testStalePodName  = "stale"
+	testFreshPodName  = "fresh"
+	testSomePodName   = "some-pod"
+	envLabelKey       = "env"
+	tierLabelKey      = "tier"
+	tierValueBatch    = "batch"
+	testMainContainer = "main"
 )
 
 func failedPod(name string, failedMinutesAgo time.Duration, now time.Time) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, UID: types.UID(name + "-uid")},
-		Status: corev1.PodStatus{
-			Phase:     corev1.PodFailed,
-			StartTime: ptrTime(now.Add(-failedMinutesAgo)),
-		},
-	}
+	pod := podFailedAt(now.Add(-failedMinutesAgo))
+	pod.ObjectMeta = metav1.ObjectMeta{Name: name, Namespace: testNamespace, UID: types.UID(name + "-uid")}
+	return &pod
 }
 
 func evalTestPolicy(ttl time.Duration, mode string) *sweeperv1alpha1.PodSweepPolicy {
@@ -987,4 +1137,51 @@ func TestEvaluationSubReconcilerTerminatingPods(t *testing.T) {
 			t.Errorf("CurrentGauge = %v, want 1 (the terminating pod is not a candidate)", gauge)
 		}
 	})
+}
+
+func TestEvaluationSubReconciler_LongRunningPodWithoutCandidatesIsKept(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ttl := time.Hour
+	noProtected := sets.New[string]()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-lost", Namespace: testNamespace, UID: "node-lost-uid"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: testMainContainer}}},
+		Status: corev1.PodStatus{
+			Phase:     corev1.PodFailed,
+			Reason:    "NodeLost",
+			StartTime: ptrTime(now.Add(-30 * 24 * time.Hour)),
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: testMainContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+		},
+	}
+	policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
+	c := newFakeClientForEval(t, ns, pod, policy)
+	t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+	tracker := newFirstSeenTracker()
+	key := types.NamespacedName{Name: pod.Name, Namespace: testNamespace}
+
+	first := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, tracker)
+	first.Now = func() time.Time { return now }
+	result, err := first.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() #1 error = %v", err)
+	}
+	if err := c.Get(context.Background(), key, &corev1.Pod{}); err != nil {
+		t.Fatalf("pod deleted on the first pass, want it kept: %v", err)
+	}
+	// The requeue is jittered by up to 10%.
+	if maxRequeue := defaultPollInterval + defaultPollInterval/10; result.RequeueAfter <= 0 || result.RequeueAfter > maxRequeue {
+		t.Errorf("RequeueAfter = %v, want in (0, %v]", result.RequeueAfter, maxRequeue)
+	}
+
+	second := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, tracker)
+	second.Now = func() time.Time { return now.Add(ttl + time.Minute) }
+	if _, err := second.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile() #2 error = %v", err)
+	}
+	if err := c.Get(context.Background(), key, &corev1.Pod{}); !errors.IsNotFound(err) {
+		t.Errorf("pod not deleted once TTL passed since first seen, got error: %v", err)
+	}
 }

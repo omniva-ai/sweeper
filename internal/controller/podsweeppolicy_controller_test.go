@@ -155,13 +155,9 @@ var _ = Describe("PodSweepPolicyReconciler", func() {
 		}
 		DeferCleanup(func() { metrics.DeletePolicy(policy.Name) })
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "stale", Namespace: testNamespace},
-			Status: corev1.PodStatus{
-				Phase:     corev1.PodFailed,
-				StartTime: ptrTime(time.Now().Add(-time.Hour)),
-			},
-		}
+		stale := podFailedAt(time.Now().Add(-time.Hour))
+		stale.ObjectMeta = metav1.ObjectMeta{Name: "stale", Namespace: testNamespace}
+		pod := &stale
 		cl := newValidationTestClient(policy, ns, pod)
 
 		reconciler := &PodSweepPolicyReconciler{Client: cl, Recorder: record.NewFakeRecorder(1)}
@@ -184,13 +180,9 @@ var _ = Describe("PodSweepPolicyReconciler", func() {
 		}
 		DeferCleanup(func() { metrics.DeletePolicy(policy.Name) })
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "stale", Namespace: testNamespace},
-			Status: corev1.PodStatus{
-				Phase:     corev1.PodFailed,
-				StartTime: ptrTime(time.Now().Add(-time.Hour)),
-			},
-		}
+		stale := podFailedAt(time.Now().Add(-time.Hour))
+		stale.ObjectMeta = metav1.ObjectMeta{Name: "stale", Namespace: testNamespace}
+		pod := &stale
 		cl := newValidationTestClient(policy, ns, pod)
 
 		reconciler := &PodSweepPolicyReconciler{Client: cl, Recorder: record.NewFakeRecorder(1)}
