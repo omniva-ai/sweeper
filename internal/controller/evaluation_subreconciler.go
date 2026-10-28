@@ -138,11 +138,9 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 		tracker = newFirstSeenTracker()
 	}
 	evaluatedAt := now()
-	for i := range candidates {
-		tracker.observe(&candidates[i], evaluatedAt)
-	}
 
-	eligible, requeueAfter := evaluate(candidates, r.Policy.Spec.TTL.Duration, evaluatedAt, defaultPollInterval)
+	eligible, requeueAfter := evaluate(candidates, r.Policy.Spec.TTL.Duration, evaluatedAt, defaultPollInterval,
+		func(p *corev1.Pod) time.Time { return tracker.observe(p, evaluatedAt) })
 
 	eligibleByNamespace := make(map[string]float64, len(matched))
 	for _, ns := range matched {
@@ -266,35 +264,83 @@ func asSelector(ls *metav1.LabelSelector) (labels.Selector, error) {
 	return metav1.LabelSelectorAsSelector(ls)
 }
 
-// failedSince computes when a Failed-phase pod became failed, using the fallback order from
-// docs/ARCHITECTURE.md: max terminated container finishedAt, else pod.Status.StartTime, else
-// pod.CreationTimestamp. There is no single authoritative field for this, so callers must not
-// assume any one of these is always present.
-func failedSince(pod *corev1.Pod) time.Time {
-	var latest time.Time
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.State.Terminated == nil {
-			continue
-		}
-		if t := cs.State.Terminated.FinishedAt.Time; t.After(latest) {
+// failedSince estimates when a Failed-phase pod failed. No single field records this, so it
+// takes the latest of these failure signals: the finishedAt of terminated main and init
+// containers, and the lastTransitionTime of Ready=False, ContainersReady=False and
+// DisruptionTarget=True. Zero timestamps are not signals. When the signals do not explain the
+// failure, firstSeen (when the controller first saw the pod Failed) joins the max, so an old
+// signal from before the failure cannot make the pod look expired. The result is never later
+// than now. StartTime and CreationTimestamp say nothing about the failure and are not read.
+// See docs/ARCHITECTURE.md and ADR-0004.
+func failedSince(pod *corev1.Pod, firstSeen, now time.Time) time.Time {
+	latest, explained := latestFailureSignal(pod)
+	if !explained && firstSeen.After(latest) {
+		latest = firstSeen
+	}
+	if latest.After(now) {
+		return now
+	}
+	return latest
+}
+
+// latestFailureSignal returns the latest failure signal of pod and whether the signals explain
+// the failure: every main container in the spec has terminated with a known finishedAt (the pod
+// fails when its last container ends), or a DisruptionTarget=True condition has a known time.
+// Ephemeral containers and lastTerminationState are ignored: a debug container or an earlier
+// restart ending does not mean the pod failed.
+func latestFailureSignal(pod *corev1.Pod) (latest time.Time, explained bool) {
+	consider := func(t time.Time) {
+		if t.After(latest) {
 			latest = t
 		}
 	}
-	if !latest.IsZero() {
-		return latest
+
+	terminated := make(map[string]bool, len(pod.Status.ContainerStatuses))
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil && !cs.State.Terminated.FinishedAt.IsZero() {
+			terminated[cs.Name] = true
+			consider(cs.State.Terminated.FinishedAt.Time)
+		}
 	}
-	if pod.Status.StartTime != nil {
-		return pod.Status.StartTime.Time
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.State.Terminated != nil && !cs.State.Terminated.FinishedAt.IsZero() {
+			consider(cs.State.Terminated.FinishedAt.Time)
+		}
 	}
-	return pod.CreationTimestamp.Time
+
+	disrupted := false
+	for _, c := range pod.Status.Conditions {
+		if c.LastTransitionTime.IsZero() {
+			continue
+		}
+		switch {
+		case c.Type == corev1.PodReady && c.Status == corev1.ConditionFalse,
+			c.Type == corev1.ContainersReady && c.Status == corev1.ConditionFalse:
+			consider(c.LastTransitionTime.Time)
+		case c.Type == corev1.DisruptionTarget && c.Status == corev1.ConditionTrue:
+			disrupted = true
+			consider(c.LastTransitionTime.Time)
+		}
+	}
+
+	allTerminated := len(pod.Spec.Containers) > 0
+	for _, c := range pod.Spec.Containers {
+		if !terminated[c.Name] {
+			allTerminated = false
+			break
+		}
+	}
+	return latest, allTerminated || disrupted
 }
 
 // evaluate splits pods into those eligible for deletion (failed for at least ttl) and computes
 // how long until the next not-yet-eligible pod becomes eligible, capped at defaultPollInterval.
-func evaluate(pods []corev1.Pod, ttl time.Duration, now time.Time, defaultPollInterval time.Duration) (eligible []corev1.Pod, requeueAfter time.Duration) {
+// firstSeen is called for every pod, so a caller that records sightings in it records them all.
+func evaluate(pods []corev1.Pod, ttl time.Duration, now time.Time, defaultPollInterval time.Duration,
+	firstSeen func(*corev1.Pod) time.Time) (eligible []corev1.Pod, requeueAfter time.Duration) {
 	requeueAfter = defaultPollInterval
 	for i := range pods {
-		age := now.Sub(failedSince(&pods[i]))
+		age := now.Sub(failedSince(&pods[i], firstSeen(&pods[i]), now))
 		if age >= ttl {
 			eligible = append(eligible, pods[i])
 			continue
