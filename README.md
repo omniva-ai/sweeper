@@ -173,3 +173,4 @@ Sweeper is licensed under the [Apache License 2.0](LICENSE).
 - [`docs/adr/0001-crd-based-rules.md`](docs/adr/0001-crd-based-rules.md) — sweep rules via CRD, not static config
 - [`docs/adr/0002-sub-reconciler-pattern.md`](docs/adr/0002-sub-reconciler-pattern.md) — sub-reconciler pattern and jitter package
 - [`docs/adr/0003-oci-manifest-release.md`](docs/adr/0003-oci-manifest-release.md) — OCI-packaged manifest release artifact
+- [`docs/adr/0004-failed-since-timestamp.md`](docs/adr/0004-failed-since-timestamp.md) — failed-since from failure signals and an in-memory first-seen time
