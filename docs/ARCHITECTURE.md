@@ -92,13 +92,48 @@ A pod is a candidate if `pod.Status.Phase == v1.PodFailed` and it is not termina
 `restartPolicy: Never`. A Failed pod that a finalizer holds (for example the Job tracking
 finalizer) is already being deleted, so it is not sweeper's work and is not a candidate.
 
-There is no single authoritative field for "when did this pod become Failed", so the "failed
-since" timestamp is computed with this fallback order:
+There is no single authoritative field for "when did this pod become Failed". The "failed
+since" timestamp is computed from failure signals (ADR-0004):
 
-1. max of `containerStatuses[].state.terminated.finishedAt` across all containers, if any are
-   terminated
-2. else `pod.Status.StartTime`
-3. else `pod.CreationTimestamp`
+1. **Candidates.** The candidates are `state.terminated.finishedAt` of every entry in
+   `containerStatuses` and `initContainerStatuses`, and the `lastTransitionTime` of the pod
+   conditions `Ready=False`, `ContainersReady=False` and `DisruptionTarget=True`. A zero
+   timestamp is not a candidate.
+2. **Latest wins.** failedSince is the latest candidate. When clocks disagree, the latest
+   candidate keeps the pod longer, never shorter.
+3. **Explained failure.** The candidates decide alone only when they explain the failure:
+   every container in `spec.containers` has a terminated status with a `finishedAt` (the pod
+   fails when its last container ends), or a `DisruptionTarget=True` condition has a
+   `lastTransitionTime`. Otherwise the time when sweeper first saw the pod as Failed is added to
+   the candidates, and with no candidates it is the result. This stops an old signal, such as a
+   stale `Ready=False` or an init or sibling container that ended weeks before the failure, from
+   making the pod look expired.
+4. **Cap at now.** The result is `min(latest, now)`, so a node clock that runs ahead of the
+   controller never gives a negative age. The full TTL then applies from now.
+
+Deliberately ignored:
+
+- `status.startTime` and `metadata.creationTimestamp`: they say when the pod started, not when it
+  failed. A pod that ran for weeks and then failed would otherwise be deleted at once.
+- `ephemeralContainerStatuses`: a debug container that ends does not mean the pod failed.
+- `lastTerminationState`: it is an earlier restart, not the final failure.
+
+The first-seen time is kept in memory only, in one tracker on `PodSweepPolicyReconciler` that
+all policies share (one entry per pod UID, the earliest sighting). Sweeper never writes to pods,
+so this needs no RBAC beyond `get;list;watch;delete` on pods. After a controller restart or a
+leader-election failover the tracker is empty, so a pod whose failure is not explained gets a new
+first-seen time and its TTL starts again. This can only delay a deletion, never bring one forward.
+Each reconcile, before the sub-reconciler chain, prunes the tracker through the cached client:
+an entry is removed when its pod is gone, has a new UID, is no longer `Failed`, or is
+terminating. A failed read keeps the entry and is logged. Pruning does not use policy
+membership, so a pod that leaves one policy's selector keeps its entry for another policy that
+still matches it. After the last policy is deleted no reconcile runs, so the remaining entries
+stay until the next restart.
+
+Known limitation: a node clock that runs behind the controller by more than the TTL can still
+make an explained failure look expired early. Kubelet sets condition times with the same node
+clock, so only the first-seen time would help, and adding it always would restart every TTL on
+each controller restart. Node clocks are expected to be NTP-synced.
 
 A pod becomes a deletion candidate once `now - failedSince >= spec.ttl`.
 
@@ -259,8 +294,8 @@ toolchains match.
 ### Tests
 
 - **Unit tests** — `sigs.k8s.io/controller-runtime/pkg/envtest`, table-driven, one file per
-  sub-reconciler plus dedicated tests for the protected-namespace gate and the failed-since
-  algorithm.
+  sub-reconciler plus dedicated tests for the protected-namespace gate, the failed-since
+  algorithm (`TestFailedSince`) and the first-seen tracker (`TestFirstSeenTracker_*`).
 - **e2e tests** — `kind`-based, under `test/e2e`: build the image, load it into a `kind` cluster,
   apply the CRDs and sample `PodSweepPolicy` objects, and assert on both `report` (pod survives,
   gauge increments) and `enforce` (pod is deleted, counter increments) behavior.
