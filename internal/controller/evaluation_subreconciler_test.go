@@ -251,7 +251,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		c := newFakeClientForEval(t, ns, pod, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -279,7 +279,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		c := newFakeClientForEval(t, ns, stale, fresh, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -308,7 +308,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		c := newFakeClientForEval(t, ns, pod, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		result, err := r.Reconcile(context.Background())
@@ -333,7 +333,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		c := newFakeClientForEval(t, ns, pod, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -362,7 +362,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
 		c := newFakeClientForEval(t, ns, running, policy)
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -390,7 +390,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeReport)
 		c := newFakeClientForEval(t, ns, pod, policy)
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		result, err := r.Reconcile(context.Background())
@@ -418,7 +418,7 @@ func TestEvaluationSubReconcilerReconcile(t *testing.T) {
 		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
 		c := newFakeClientForEval(t, ns, pod, policy)
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, sets.New(testNamespace), noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, sets.New(testNamespace), noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -694,7 +694,7 @@ func TestEvaluationSubReconcilerConditions(t *testing.T) {
 
 	newReconciler := func(c client.Client, policy *sweeperv1alpha1.PodSweepPolicy) (*EvaluationSubReconciler, *record.FakeRecorder) {
 		recorder := record.NewFakeRecorder(10)
-		r := NewEvaluationSubReconciler(c, recorder, policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, recorder, policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 		return r, recorder
 	}
@@ -872,7 +872,7 @@ func TestEvaluationSubReconcilerDeletePreconditions(t *testing.T) {
 		}, ns, pod, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -908,7 +908,7 @@ func TestEvaluationSubReconcilerDeletePreconditions(t *testing.T) {
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
 		recorder := record.NewFakeRecorder(10)
-		r := NewEvaluationSubReconciler(c, recorder, policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, recorder, policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {
@@ -951,7 +951,7 @@ func TestEvaluationSubReconcilerTerminatingPods(t *testing.T) {
 		}, ns, terminating, stale, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		for i := 0; i < 2; i++ {
@@ -977,7 +977,7 @@ func TestEvaluationSubReconcilerTerminatingPods(t *testing.T) {
 		c := newFakeClientForEval(t, ns, terminating, stale, policy)
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 
-		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected)
+		r := NewEvaluationSubReconciler(c, record.NewFakeRecorder(10), policy, noProtected, noProtected, nil)
 		r.Now = func() time.Time { return now }
 
 		if _, err := r.Reconcile(context.Background()); err != nil {

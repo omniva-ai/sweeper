@@ -66,18 +66,23 @@ type EvaluationSubReconciler struct {
 
 	// Now returns the current time; overridden in tests. Defaults to time.Now.
 	Now func() time.Time
+
+	// firstSeen is shared across policies and reconciles; nil means a fresh tracker per pass.
+	firstSeen *firstSeenTracker
 }
 
 // NewEvaluationSubReconciler constructs an EvaluationSubReconciler for a single reconcile
 // request against policy.
 func NewEvaluationSubReconciler(cl client.Client, recorder record.EventRecorder,
-	policy *sweeperv1alpha1.PodSweepPolicy, protected, allowed sets.Set[string]) *EvaluationSubReconciler {
+	policy *sweeperv1alpha1.PodSweepPolicy, protected, allowed sets.Set[string],
+	firstSeen *firstSeenTracker) *EvaluationSubReconciler {
 	return &EvaluationSubReconciler{
 		Client:              cl,
 		Recorder:            recorder,
 		Policy:              policy,
 		ProtectedNamespaces: protected,
 		AllowedNamespaces:   allowed,
+		firstSeen:           firstSeen,
 	}
 }
 
@@ -128,7 +133,16 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 		now = r.Now
 	}
 
-	eligible, requeueAfter := evaluate(candidates, r.Policy.Spec.TTL.Duration, now(), defaultPollInterval)
+	tracker := r.firstSeen
+	if tracker == nil {
+		tracker = newFirstSeenTracker()
+	}
+	evaluatedAt := now()
+	for i := range candidates {
+		tracker.observe(&candidates[i], evaluatedAt)
+	}
+
+	eligible, requeueAfter := evaluate(candidates, r.Policy.Spec.TTL.Duration, evaluatedAt, defaultPollInterval)
 
 	eligibleByNamespace := make(map[string]float64, len(matched))
 	for _, ns := range matched {

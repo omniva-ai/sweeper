@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -25,6 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 	"github.com/omniva-ai/sweeper/internal/reconciler"
@@ -47,6 +49,9 @@ type PodSweepPolicyReconciler struct {
 	ProtectedNamespaces []string
 	// AllowedNamespaces explicitly unlocks protected namespaces (from --allow-protected-namespace).
 	AllowedNamespaces []string
+
+	firstSeenOnce sync.Once
+	firstSeen     *firstSeenTracker
 }
 
 // +kubebuilder:rbac:groups=sweeper.omniva.com,resources=podsweeppolicies,verbs=get;list;watch;update;patch
@@ -72,12 +77,17 @@ func (r *PodSweepPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
+	tracker := r.firstSeenTracker()
+	if err := tracker.prune(ctx, r.Client); err != nil {
+		logf.FromContext(ctx).Error(err, "pruning first-seen Failed times")
+	}
+
 	protected := sets.New(r.ProtectedNamespaces...)
 	allowed := sets.New(r.AllowedNamespaces...)
 
 	subReconcilers := []reconciler.Reconciler{
 		NewValidationSubReconciler(r.Client, r.Recorder, &policy, protected, allowed),
-		NewEvaluationSubReconciler(r.Client, r.Recorder, &policy, protected, allowed),
+		NewEvaluationSubReconciler(r.Client, r.Recorder, &policy, protected, allowed, tracker),
 	}
 
 	for _, sub := range subReconcilers {
@@ -115,4 +125,11 @@ func (r *PodSweepPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return bldr.Complete(r)
+}
+
+// firstSeenTracker returns the tracker shared by every reconcile, creating it on first use so a
+// PodSweepPolicyReconciler built as a struct literal works without extra setup.
+func (r *PodSweepPolicyReconciler) firstSeenTracker() *firstSeenTracker {
+	r.firstSeenOnce.Do(func() { r.firstSeen = newFirstSeenTracker() })
+	return r.firstSeen
 }
