@@ -20,6 +20,7 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -95,8 +96,21 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, "make", "undeploy")
+		// Without WaitDelay, CombinedOutput keeps waiting after the deadline kills make while
+		// a kubectl child still holds the output pipe.
+		cmd.WaitDelay = 10 * time.Second
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to undeploy the controller-manager")
+
+		By("verifying the PodSweepPolicy CRD is gone")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "crd", "podsweeppolicies.sweeper.omniva.com")
+			_, err := utils.Run(cmd)
+			g.Expect(err).To(MatchError(ContainSubstring("NotFound")))
+		}).Should(Succeed())
 
 		By("uninstalling CRDs")
 		cmd = exec.Command("make", "uninstall")
