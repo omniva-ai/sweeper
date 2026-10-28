@@ -168,7 +168,7 @@ undeploy: kustomize delete-policies ## Undeploy controller from the K8s cluster 
 
 .PHONY: delete-policies
 delete-policies:
-	if $(KUBECTL) get crd podsweeppolicies.sweeper.omniva.com >/dev/null 2>&1; then $(KUBECTL) delete podsweeppolicies --all --timeout=2m; fi
+	crd=$$($(KUBECTL) get crd podsweeppolicies.sweeper.omniva.com --ignore-not-found -o name) || exit 1; if [ -n "$$crd" ]; then $(KUBECTL) delete podsweeppolicies --all --timeout=2m; fi
 
 ##@ Dependencies
 
