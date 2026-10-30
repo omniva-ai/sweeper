@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 	"github.com/omniva-ai/sweeper/internal/metrics"
@@ -199,7 +200,7 @@ var _ = Describe("PodSweepPolicyReconciler", func() {
 		expectCondition(&fresh, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionTrue, reasonEvaluated)
 	})
 
-	It("flips a stale Ready=True to False when spec.namespaceSelector is invalid", func() {
+	It("flips a stale Ready=True to False and stops the chain without an error when spec.namespaceSelector is invalid", func() {
 		policy := &sweeperv1alpha1.PodSweepPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "stale-chain", Finalizers: []string{finalizerName}, Generation: 2},
 			Spec: sweeperv1alpha1.PodSweepPolicySpec{
@@ -216,13 +217,29 @@ var _ = Describe("PodSweepPolicyReconciler", func() {
 				},
 			},
 		}
-		cl := newValidationTestClient(policy)
+		var podCalls int
+		cl := interceptor.NewClient(newValidationTestClient(policy).(client.WithWatch), interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.PodList); ok {
+					podCalls++
+				}
+				return c.List(ctx, list, opts...)
+			},
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, ok := obj.(*corev1.Pod); ok {
+					podCalls++
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		})
 
 		reconciler := &PodSweepPolicyReconciler{Client: cl, Recorder: record.NewFakeRecorder(10)}
 		req = ctrl.Request{NamespacedName: types.NamespacedName{Name: policy.Name}}
 
-		_, err := reconciler.Reconcile(ctx, req)
-		Expect(err).To(HaveOccurred())
+		result, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(ctrl.Result{}))
+		Expect(podCalls).To(BeZero(), "evaluation must not run on an invalid spec")
 
 		var fresh sweeperv1alpha1.PodSweepPolicy
 		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())

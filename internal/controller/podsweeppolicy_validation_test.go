@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 )
@@ -155,8 +157,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		}
 		cl := newValidationTestClient(policy)
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		expectNotReady(policy, reasonInvalidMode, "invalid mode")
 		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidMode)))
@@ -169,8 +172,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		}
 		cl := newValidationTestClient(policy)
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		expectNotReady(policy, reasonInvalidTTL, "invalid ttl")
 		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidTTL)))
@@ -186,8 +190,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		}
 		cl := newValidationTestClient(policy)
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		expectNotReady(policy, reasonInvalidNamespaceSelector, "invalid spec.namespaceSelector: ")
 		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidNamespaceSelector)))
@@ -204,8 +209,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		// listErrorClient proves the namespace gate is never reached for a bad pod selector.
 		cl := &listErrorClient{Client: newValidationTestClient(policy)}
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		expectNotReady(policy, reasonInvalidPodSelector, "invalid spec.podSelector: ")
 		Expect(recorder.Events).To(Receive(ContainSubstring(reasonInvalidPodSelector)))
@@ -221,8 +227,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		}
 		cl := newValidationTestClient(policy)
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		expectNotReady(policy, reasonInvalidPodSelector, "invalid spec.podSelector: ")
 	})
@@ -238,8 +245,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		}
 		cl := newValidationTestClient(policy)
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		expectNotReady(policy, reasonInvalidPodSelector, "invalid spec.podSelector: ")
 	})
@@ -253,6 +261,7 @@ var _ = Describe("ValidationSubReconciler", func() {
 
 		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
 		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(MatchError(errStopChain))
 
 		expectNotReady(policy, reasonNamespaceListFailed, "listing namespaces: ")
 		Expect(recorder.Events).To(Receive(ContainSubstring(reasonNamespaceListFailed)))
@@ -275,8 +284,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		}
 		cl := newValidationTestClient(policy)
 
-		_, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
 
 		var fresh sweeperv1alpha1.PodSweepPolicy
 		Expect(cl.Get(ctx, client.ObjectKeyFromObject(policy), &fresh)).To(Succeed())
@@ -296,7 +306,7 @@ var _ = Describe("ValidationSubReconciler", func() {
 		r := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
 
 		_, err := r.Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(errStopChain))
 
 		policy.Spec.PodSelector = nil
 		_, err = r.Reconcile(ctx)
@@ -322,9 +332,9 @@ var _ = Describe("ValidationSubReconciler", func() {
 		r := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
 
 		_, err := r.Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(errStopChain))
 		_, err = r.Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(errStopChain))
 
 		Expect(recorder.Events).To(HaveLen(1))
 	})
@@ -341,13 +351,56 @@ var _ = Describe("ValidationSubReconciler", func() {
 		r := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
 
 		_, err := r.Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(errStopChain))
 		policy.Generation = 2
 		_, err = r.Reconcile(ctx)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(errStopChain))
 
 		Expect(recorder.Events).To(HaveLen(1))
 		Expect(readyCondition(policy).ObservedGeneration).To(BeEquivalentTo(2))
+	})
+
+	It("does not re-write status or re-record the event when a permanent failure repeats", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "stable-failure"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		cl := &countingStatusClient{Client: newValidationTestClient(policy)}
+		sub := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]())
+
+		_, err := sub.Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(cl.statusUpdates).To(Equal(1))
+		Eventually(recorder.Events).Should(Receive(ContainSubstring(reasonInvalidPodSelector)))
+
+		result, err := sub.Reconcile(ctx)
+		Expect(err).To(MatchError(errStopChain))
+		Expect(result).To(Equal(ctrl.Result{}))
+		Expect(cl.statusUpdates).To(Equal(1), "an unchanged failure must not write status again")
+		Consistently(recorder.Events).ShouldNot(Receive(), "an unchanged failure must not re-record the event")
+	})
+
+	It("returns the status error when the status write fails on a permanent failure", func() {
+		policy := &sweeperv1alpha1.PodSweepPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "permanent-failure-status-error"},
+			Spec: sweeperv1alpha1.PodSweepPolicySpec{
+				TTL:         metav1.Duration{Duration: time.Hour},
+				PodSelector: badOperatorSelector(),
+			},
+		}
+		statusErr := errors.New("injected status update failure")
+		cl := interceptor.NewClient(newValidationTestClient(policy).(client.WithWatch), interceptor.Funcs{
+			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+				return statusErr
+			},
+		})
+
+		result, err := NewValidationSubReconciler(cl, recorder, policy, sets.New[string](), sets.New[string]()).Reconcile(ctx)
+		Expect(err).To(BeIdenticalTo(statusErr))
+		Expect(result).To(Equal(ctrl.Result{}))
 	})
 
 	It("skips a protected namespace, sets the condition, and records a Warning event", func() {
