@@ -56,3 +56,9 @@ func JitteredIntervalDuration(d time.Duration) time.Duration
 - The "main controller composes sub-reconcilers in order, stopping at the first error or non-zero
   result" wiring is `sweeper`'s own implementation, documented in
   [`ARCHITECTURE.md`](../ARCHITECTURE.md#sub-reconciler-wiring).
+- A sub-reconciler can return the unexported sentinel `errStopChain` to stop the chain without an
+  error, for a failure that only a spec edit can fix (such as an invalid `spec.ttl`). The main
+  controller detects it with `errors.Is` and returns `ctrl.Result{}, nil`. The spec edit triggers
+  the next reconcile, so a retry with backoff would only add error logs and increment
+  `controller_runtime_reconcile_errors_total`. The `reconciler.Reconciler` interface does not
+  change.
