@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -26,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 )
@@ -42,6 +44,11 @@ const (
 	reasonNoProtectedNamespaces       = "NoProtectedNamespaces"
 	reasonDisabled                    = "Disabled"
 )
+
+// errStopChain tells the main reconciler to stop the sub-reconciler chain and return no error.
+// A sub-reconciler returns it for a failure that only a spec edit can fix: the spec edit triggers
+// a new reconcile, so a retry with backoff only adds error logs and error metrics.
+var errStopChain = errors.New("stop the sub-reconciler chain")
 
 // ValidationSubReconciler validates spec.ttl, spec.mode, spec.namespaceSelector, and
 // spec.podSelector, applies the operator-level protected-namespace gate to spec.namespaceSelector,
@@ -76,8 +83,9 @@ func (r *ValidationSubReconciler) Name() string {
 // gate, and sets status.conditions. The CRD schema already rejects a malformed or non-positive
 // ttl, an unknown mode, and a bad selector operator at admission; the checks here are defense in
 // depth for objects stored before those rules existed, and for selector errors CEL cannot see
-// (such as an invalid label value). Every failure path goes through failReady, so the object's
-// status reflects a clear validation failure rather than keeping a stale Ready=True.
+// (such as an invalid label value). Every failure path goes through failReady or
+// failReadyPermanent, so the object's status reflects a clear validation failure rather than
+// keeping a stale Ready=True.
 func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, error) {
 	mode := r.Policy.Spec.Mode
 	if mode == "" {
@@ -86,22 +94,22 @@ func (r *ValidationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	if mode != sweeperv1alpha1.ModeEnforce && mode != sweeperv1alpha1.ModeReport && mode != sweeperv1alpha1.ModeDisable {
 		err := fmt.Errorf("invalid mode %q: must be one of %s, %s, %s", r.Policy.Spec.Mode,
 			sweeperv1alpha1.ModeEnforce, sweeperv1alpha1.ModeReport, sweeperv1alpha1.ModeDisable)
-		return r.failReady(ctx, reasonInvalidMode, err)
+		return r.failReadyPermanent(ctx, reasonInvalidMode, err)
 	}
 
 	if r.Policy.Spec.TTL.Duration <= 0 {
 		err := fmt.Errorf("invalid ttl %q: must be greater than zero", r.Policy.Spec.TTL.Duration)
-		return r.failReady(ctx, reasonInvalidTTL, err)
+		return r.failReadyPermanent(ctx, reasonInvalidTTL, err)
 	}
 
 	// Both selectors are parsed before the disable early return, like ttl and mode, so a disabled
 	// rule with a bad selector reports it before the mode changes. The parsed values are not kept:
 	// resolveNamespaceGate and EvaluationSubReconciler parse again where they use them.
 	if _, err := asSelector(r.Policy.Spec.NamespaceSelector); err != nil {
-		return r.failReady(ctx, reasonInvalidNamespaceSelector, fmt.Errorf("invalid spec.namespaceSelector: %w", err))
+		return r.failReadyPermanent(ctx, reasonInvalidNamespaceSelector, fmt.Errorf("invalid spec.namespaceSelector: %w", err))
 	}
 	if _, err := asSelector(r.Policy.Spec.PodSelector); err != nil {
-		return r.failReady(ctx, reasonInvalidPodSelector, fmt.Errorf("invalid spec.podSelector: %w", err))
+		return r.failReadyPermanent(ctx, reasonInvalidPodSelector, fmt.Errorf("invalid spec.podSelector: %w", err))
 	}
 
 	// disable means "not evaluated at all" (docs/ARCHITECTURE.md): no namespace listing, no
@@ -148,13 +156,32 @@ func (r *ValidationSubReconciler) Delete(_ context.Context) (ctrl.Result, error)
 	return ctrl.Result{}, nil
 }
 
-// failReady sets Ready=False with reason and cause's message, sets Evaluated=False/NotReady
-// because the main reconciler stops the chain on the returned error and evaluation never runs,
-// records a Warning when Ready transitioned to this failure, writes status, and returns cause
-// joined with any status error so the object is requeued.
+// failReady sets the conditions of setNotReady for a transient failure, writes status, and
+// returns cause joined with any status error so the object is requeued.
 func (r *ValidationSubReconciler) failReady(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
+	changed := r.setNotReady(reason, cause)
+	return ctrl.Result{}, writeFailure(ctx, r.Client, r.Policy, changed, cause)
+}
+
+// failReadyPermanent sets the conditions of setNotReady for a failure that only a spec edit can
+// fix, writes status, and returns errStopChain so the main reconciler stops the chain without an
+// error. If the status write fails, it returns only the status error, so the object is requeued
+// until the condition is persisted.
+func (r *ValidationSubReconciler) failReadyPermanent(ctx context.Context, reason string, cause error) (ctrl.Result, error) {
+	logf.FromContext(ctx).Info("spec is not valid; waiting for a spec change", "reason", reason, "message", cause.Error())
+	changed := r.setNotReady(reason, cause)
+	if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+	return ctrl.Result{}, errStopChain
+}
+
+// setNotReady sets Ready=False with reason and cause's message, records a Warning when Ready
+// transitioned to this failure, and sets Evaluated=False/NotReady because evaluation does not
+// run while Ready is False. It returns true when either condition changed.
+func (r *ValidationSubReconciler) setNotReady(reason string, cause error) bool {
 	readyChanged := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeReady, reason, cause.Error())
 	evaluatedChanged := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
 		metav1.ConditionFalse, reasonNotReady, "rule is not evaluated while Ready is False")
-	return ctrl.Result{}, writeFailure(ctx, r.Client, r.Policy, readyChanged || evaluatedChanged, cause)
+	return readyChanged || evaluatedChanged
 }

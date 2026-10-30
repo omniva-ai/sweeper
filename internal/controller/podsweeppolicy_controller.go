@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,7 +63,8 @@ type PodSweepPolicyReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile walks the ordered sub-reconciler chain for a PodSweepPolicy (ADR-0002), stopping at
-// the first error or first non-zero ctrl.Result.
+// the first error or first non-zero ctrl.Result. A sub-reconciler that returns errStopChain
+// stops the chain, and Reconcile then returns no error and no requeue.
 func (r *PodSweepPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var policy sweeperv1alpha1.PodSweepPolicy
 	if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
@@ -99,6 +101,9 @@ func (r *PodSweepPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			result, err = sub.Delete(ctx)
 		} else {
 			result, err = sub.Reconcile(ctx)
+		}
+		if errors.Is(err, errStopChain) {
+			return ctrl.Result{}, nil
 		}
 		if err != nil || result != (ctrl.Result{}) {
 			return result, err
