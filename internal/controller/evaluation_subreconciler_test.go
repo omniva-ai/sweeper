@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	mathrand "math/rand/v2"
 	"reflect"
@@ -36,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -828,6 +830,17 @@ func evaluatedCond(t *testing.T, policy *sweeperv1alpha1.PodSweepPolicy) *metav1
 	return cond
 }
 
+// expectJitteredRequeue checks that result requeues within the global jitter range around want.
+// The range is two-sided because the global jitter is set once per test binary and can be
+// either NoJitter or ±10%, depending on which test runs first.
+func expectJitteredRequeue(t *testing.T, result ctrl.Result, want time.Duration) {
+	t.Helper()
+	minRequeue, maxRequeue := want-want/10, want+want/10
+	if result.RequeueAfter < minRequeue || result.RequeueAfter > maxRequeue {
+		t.Errorf("RequeueAfter = %v, want in [%v, %v]", result.RequeueAfter, minRequeue, maxRequeue)
+	}
+}
+
 func expectEvaluated(t *testing.T, policy *sweeperv1alpha1.PodSweepPolicy, status metav1.ConditionStatus, reason string) {
 	t.Helper()
 	cond := evaluatedCond(t, policy)
@@ -909,7 +922,7 @@ func TestEvaluationSubReconcilerConditions(t *testing.T) {
 		}
 	})
 
-	t.Run("sets Evaluated=False/DeleteFailed and returns the delete error on a delete failure", func(t *testing.T) {
+	t.Run("sets Evaluated=False/DeleteFailed and requeues after deleteRetryDelay on a delete failure", func(t *testing.T) {
 		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
 		stale := failedPod(testStalePodName, 11*time.Minute, now)
 		other := failedPod(testSomePodName, 12*time.Minute, now)
@@ -917,9 +930,11 @@ func TestEvaluationSubReconcilerConditions(t *testing.T) {
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 		r, recorder := newReconciler(c, policy)
 
-		if _, err := r.Reconcile(context.Background()); err == nil {
-			t.Fatal("Reconcile() error = nil, want an error")
+		result, err := r.Reconcile(context.Background())
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v, want nil", err)
 		}
+		expectJitteredRequeue(t, result, deleteRetryDelay)
 		expectEvaluated(t, policy, metav1.ConditionFalse, reasonDeleteFailed)
 		if counter := testutil.ToFloat64(metrics.DeletedTotal.WithLabelValues(testNamespace, policy.Name)); counter != 0 {
 			t.Errorf("DeletedTotal = %v, want 0", counter)
@@ -937,12 +952,52 @@ func TestEvaluationSubReconcilerConditions(t *testing.T) {
 		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
 		r, _ := newReconciler(c, policy)
 
-		if _, err := r.Reconcile(context.Background()); err == nil {
-			t.Fatal("Reconcile() error = nil, want an error")
+		result, err := r.Reconcile(context.Background())
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v, want nil", err)
 		}
+		expectJitteredRequeue(t, result, deleteRetryDelay)
 		expectEvaluated(t, policy, metav1.ConditionFalse, reasonDeleteFailed)
 		if counter := testutil.ToFloat64(metrics.DeletedTotal.WithLabelValues(testNamespace, policy.Name)); counter != 1 {
 			t.Errorf("DeletedTotal = %v, want 1", counter)
+		}
+	})
+
+	t.Run("requeues at the TTL delay on a delete failure when a pod becomes eligible sooner", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
+		stale := failedPod(testStalePodName, 11*time.Minute, now)
+		fresh := failedPod(testFreshPodName, ttl-10*time.Second, now)
+		c := &deleteErrorClient{Client: newFakeClientForEval(t, ns, stale, fresh, policy)}
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+		r, _ := newReconciler(c, policy)
+
+		result, err := r.Reconcile(context.Background())
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v, want nil", err)
+		}
+		expectJitteredRequeue(t, result, 10*time.Second)
+		expectEvaluated(t, policy, metav1.ConditionFalse, reasonDeleteFailed)
+	})
+
+	t.Run("returns the status error and no requeue when the status write fails after a delete failure", func(t *testing.T) {
+		policy := evalTestPolicy(ttl, sweeperv1alpha1.ModeEnforce)
+		stale := failedPod(testStalePodName, 11*time.Minute, now)
+		statusErr := fmt.Errorf("injected status update failure")
+		intercepted := newInterceptedClientForEval(t, interceptor.Funcs{
+			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+				return statusErr
+			},
+		}, ns, stale, policy)
+		c := &deleteErrorClient{Client: intercepted}
+		t.Cleanup(func() { metrics.DeletePolicy(policy.Name) })
+		r, _ := newReconciler(c, policy)
+
+		result, err := r.Reconcile(context.Background())
+		if !stderrors.Is(err, statusErr) {
+			t.Fatalf("Reconcile() error = %v, want %v", err, statusErr)
+		}
+		if result != (ctrl.Result{}) {
+			t.Errorf("Reconcile() result = %+v, want an empty result", result)
 		}
 	})
 

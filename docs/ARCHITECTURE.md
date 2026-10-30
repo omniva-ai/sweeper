@@ -190,7 +190,10 @@ outlive the policies: uninstall deletes the policies first, otherwise they and t
 walks an ordered list of sub-reconcilers, calling `Reconcile` on each in turn (or `Delete` on all
 of them, instead, when the `PodSweepPolicy` has a deletion timestamp), stopping at the first error
 or the first non-zero `ctrl.Result`; once the `deleting` pass completes cleanly, the finalizer is
-removed so the object can actually be deleted:
+removed so the object can actually be deleted. A sub-reconciler can also return the unexported
+sentinel `errStopChain` for a failure that only a spec edit can fix: the chain stops and the main
+controller returns `ctrl.Result{}, nil`, so controller-runtime does not retry the object with
+backoff. The spec edit triggers the next reconcile through the `For` watch.
 
 ```mermaid
 sequenceDiagram
@@ -201,10 +204,15 @@ sequenceDiagram
 
     Mgr->>Main: Reconcile(req)
     Main->>V: Reconcile(ctx)
-    V-->>Main: ctrl.Result{}, nil
-    Main->>E: Reconcile(ctx)
-    E-->>Main: ctrl.Result{RequeueAfter: jittered}, nil
-    Main-->>Mgr: ctrl.Result{RequeueAfter: jittered}, nil
+    alt spec is valid
+        V-->>Main: ctrl.Result{}, nil
+        Main->>E: Reconcile(ctx)
+        E-->>Main: ctrl.Result{RequeueAfter: jittered}, nil
+        Main-->>Mgr: ctrl.Result{RequeueAfter: jittered}, nil
+    else spec is not valid
+        V-->>Main: ctrl.Result{}, errStopChain
+        Main-->>Mgr: ctrl.Result{}, nil
+    end
 ```
 
 1. **`ValidationSubReconciler`** — resolves `spec.mode` (empty → `report`), parses
@@ -219,8 +227,14 @@ sequenceDiagram
    bad selector is reported too. On failure it sets `Ready=False` with reason `InvalidTTL`,
    `InvalidMode`, `InvalidNamespaceSelector`, `InvalidPodSelector`, or `NamespaceListFailed` (when
    the namespace List itself fails), sets `Evaluated=False/NotReady` because the chain stops here,
-   records a Warning event on the transition, and returns an error so the object is requeued
-   rather than silently keeping a stale `Ready=True`.
+   and records a Warning event on the transition, rather than silently keeping a stale
+   `Ready=True`. `InvalidTTL`, `InvalidMode`, `InvalidNamespaceSelector`, and
+   `InvalidPodSelector` are permanent: only a spec edit fixes them, so after the status write the
+   sub-reconciler logs the reason and message at info level and returns `errStopChain`. The
+   reconcile ends without an error and without a requeue, so these failures do not increment
+   `controller_runtime_reconcile_errors_total`. If the status write fails, it returns only the
+   status error, so the object is retried until the condition is persisted. `NamespaceListFailed`
+   is transient and returns an error so the object is requeued with backoff.
 2. **`EvaluationSubReconciler`** — for the resolved (post-protected-namespace-gate) namespace and
    pod selectors: lists `Failed`-phase pods that are not terminating, computes failed-since +
    TTL-eligibility for each, updates the "currently identified" gauge, and — only when
@@ -231,8 +245,12 @@ sequenceDiagram
    it is skipped, not counted, and does not fail the pass. It records the outcome in the `Evaluated` condition:
    `True/Evaluated` after a clean pass, `False` with `NamespaceListFailed`, `PodListFailed`, or
    `DeleteFailed` (and the error as the message) when a call fails, and `False/Disabled` in
-   `disable` mode; a transition to a failure reason records one Warning event. The returned error
-   and requeue behaviour do not change. It also implements `Watcher`, registering a watch on
+   `disable` mode; a transition to a failure reason records one Warning event. A namespace or pod
+   List failure returns an error, so the object is requeued with backoff. A delete failure does
+   not return an error: it logs the joined delete errors at error level and returns a jittered
+   requeue after `min(timeUntilNextTTLExpiry, deleteRetryDelay)` (see [Requeue](#requeue)), so
+   the TTL-based requeue is kept. If the status write on that path fails, it returns only the
+   status error and no requeue. It also implements `Watcher`, registering a watch on
    `v1.Pod` (filtered to `phase == Failed` transitions) mapped back to every `PodSweepPolicy`
    whose selectors could match it, via a controller-runtime field index, so a pod entering
    `Failed` triggers re-evaluation without waiting for the next poll.
@@ -252,7 +270,14 @@ computes:
 RequeueAfter = jitter.JitteredIntervalDuration(min(defaultPollInterval, timeUntilNextTTLExpiry))
 ```
 
-using `internal/jitter` (ADR-0002).
+using `internal/jitter` (ADR-0002). After a pod delete fails, the delay is capped further at
+`deleteRetryDelay` (30s), so the retry comes at a fixed, bounded interval instead of
+controller-runtime's exponential backoff:
+
+```go
+RequeueAfter = jitter.JitteredIntervalDuration(min(defaultPollInterval, timeUntilNextTTLExpiry, deleteRetryDelay))
+```
+
 `jitter.SetGlobalIntervalJitter` is configured once at manager startup with a named constant
 (e.g. `requeueJitterPercent = 0.10`, not a magic number inlined at the call site).
 
