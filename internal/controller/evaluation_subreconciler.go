@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
@@ -43,6 +44,11 @@ import (
 // defaultPollInterval bounds how long EvaluationSubReconciler waits before re-checking TTL
 // expiry when no Pod watch event arrives in the meantime.
 const defaultPollInterval = 5 * time.Minute
+
+// deleteRetryDelay bounds how long EvaluationSubReconciler waits before it retries after a pod
+// delete fails. It returns a requeue instead of an error, so controller-runtime's exponential
+// backoff does not apply and the TTL-based requeue is kept.
+const deleteRetryDelay = 30 * time.Second
 
 const (
 	reasonEvaluated     = "Evaluated"
@@ -167,7 +173,13 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 	}
 
 	if deleteErr != nil {
-		return requeue.WithJitterAndError(requeueAfter, r.failEvaluated(ctx, reasonDeleteFailed, deleteErr))
+		logf.FromContext(ctx).Error(deleteErr, "deleting pods past TTL")
+		changed := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
+			reasonDeleteFailed, deleteErr.Error())
+		if statusErr := writeStatusIfChanged(ctx, r.Client, r.Policy, changed); statusErr != nil {
+			return requeue.NoneWithError(statusErr)
+		}
+		return requeue.WithJitter(min(requeueAfter, deleteRetryDelay))
 	}
 
 	changed := setCondition(r.Policy, sweeperv1alpha1.ConditionTypeEvaluated,
@@ -181,8 +193,7 @@ func (r *EvaluationSubReconciler) Reconcile(ctx context.Context) (ctrl.Result, e
 
 // failEvaluated sets Evaluated=False with reason and cause's message, records a Warning when
 // the condition transitioned to this failure, writes status, and returns cause joined with any
-// status error. Callers pick the result: an empty one, or the jittered requeue after a delete
-// failure.
+// status error.
 func (r *EvaluationSubReconciler) failEvaluated(ctx context.Context, reason string, cause error) error {
 	changed := setFailureCondition(r.Recorder, r.Policy, sweeperv1alpha1.ConditionTypeEvaluated, reason, cause.Error())
 	return writeFailure(ctx, r.Client, r.Policy, changed, cause)
