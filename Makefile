@@ -102,6 +102,10 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+.PHONY: check-go-version
+check-go-version: ## Check that mise.toml, go.mod and the Dockerfile use the same Go version.
+	hack/check-go-version.sh
+
 ##@ Build
 
 .PHONY: build
