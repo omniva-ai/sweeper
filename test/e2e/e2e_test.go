@@ -449,5 +449,64 @@ var _ = Describe("Manager", Ordered, func() {
 			_, found := metricValue(scrape(), deletedTotalName, map[string]string{policyLabel: reportPolicy})
 			Expect(found).To(BeFalse(), "report policy must not have a deleted-pods series")
 		})
+
+		It("removes metric series and keeps pods when a policy is deleted", func() {
+			const (
+				testNamespace = "e2e-delete-test"
+				enforcePolicy = "e2e-delete-enforce"
+				reportPolicy  = "e2e-delete-report"
+				roleLabel     = "sweeper-e2e-role"
+			)
+			scenario := map[string]string{scenarioLabel: "e2e-delete"}
+			sweep := map[string]string{roleLabel: "sweep"}
+			keep := map[string]string{roleLabel: "keep"}
+			createTestNamespace(testNamespace, scenario)
+			applyPolicy(policySpec{
+				name:              enforcePolicy,
+				namespaceSelector: scenario,
+				podSelector:       sweep,
+				ttl:               5 * time.Second,
+				mode:              sweeperv1alpha1.ModeEnforce,
+			})
+			applyPolicy(policySpec{
+				name:              reportPolicy,
+				namespaceSelector: scenario,
+				podSelector:       keep,
+				ttl:               5 * time.Second,
+				mode:              sweeperv1alpha1.ModeReport,
+			})
+			createFailingPod(testNamespace, "sweep-pod", sweep)
+			createFailingPod(testNamespace, "keep-pod", keep)
+
+			expectPodDeleted(testNamespace, "sweep-pod")
+			expectDeletedTotal(testNamespace, enforcePolicy, 1)
+
+			By("verifying the report policy gauge counts the kept pod")
+			Eventually(func(g Gomega) {
+				value, found := metricValue(scrape(), currentGaugeName,
+					map[string]string{namespaceLabel: testNamespace, policyLabel: reportPolicy})
+				g.Expect(found).To(BeTrue(), "gauge series not yet present")
+				g.Expect(value).To(BeNumerically(">=", 1))
+			}).Should(Succeed())
+
+			By("deleting both policies")
+			cmd := exec.Command("kubectl", "delete", "podsweeppolicy", enforcePolicy, reportPolicy,
+				"--wait=true", "--timeout=60s")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the PodSweepPolicies")
+
+			By("verifying the finalizer let both policies go")
+			for _, policyName := range []string{enforcePolicy, reportPolicy} {
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "podsweeppolicy", policyName)
+					_, err := utils.Run(cmd)
+					g.Expect(err).To(MatchError(ContainSubstring("NotFound")))
+				}).Should(Succeed())
+			}
+
+			expectNoPolicySeries(enforcePolicy)
+			expectNoPolicySeries(reportPolicy)
+			expectPodKept(testNamespace, "keep-pod", 10*time.Second)
+		})
 	})
 })
