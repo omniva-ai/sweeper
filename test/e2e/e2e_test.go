@@ -299,13 +299,15 @@ var _ = Describe("Manager", Ordered, func() {
 			return scrapeMetrics(g, metricsProbePodName, metricsToken)
 		}
 
+		// A delete can repeat before the cache sees the pod's deletionTimestamp, and each
+		// successful delete is counted, so the counter can exceed the number of pods.
 		expectDeletedTotal := func(testNamespace, policyName string, want float64) {
-			By(fmt.Sprintf("verifying the deleted-pods counter of %s reaches %v", policyName, want))
+			By(fmt.Sprintf("verifying the deleted-pods counter of %s reaches at least %v", policyName, want))
 			Eventually(func(g Gomega) {
 				value, found := metricValue(scrape(g), deletedTotalName,
 					map[string]string{namespaceLabel: testNamespace, policyLabel: policyName})
 				g.Expect(found).To(BeTrue(), "counter series not yet present")
-				g.Expect(value).To(Equal(want))
+				g.Expect(value).To(BeNumerically(">=", want))
 			}).Should(Succeed())
 		}
 
