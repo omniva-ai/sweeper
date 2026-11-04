@@ -224,6 +224,54 @@ func podExists(g Gomega, ns, name string) bool {
 	return strings.TrimSpace(output) != ""
 }
 
+// policyCondition returns the status, reason and message of the policy's condType condition.
+// It fails the assertion when the condition is absent.
+func policyCondition(g Gomega, policy, condType string) (status, reason, message string) {
+	cmd := exec.Command("kubectl", "get", "podsweeppolicy", policy, "-o", "json")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	var obj sweeperv1alpha1.PodSweepPolicy
+	g.Expect(json.Unmarshal([]byte(output), &obj)).To(Succeed())
+	for _, c := range obj.Status.Conditions {
+		if c.Type == condType {
+			return string(c.Status), c.Reason, c.Message
+		}
+	}
+	g.Expect(obj.Status.Conditions).To(ContainElement(HaveField("Type", condType)))
+	return "", "", ""
+}
+
+// expectCondition asserts the status and reason of the policy's condType condition.
+func expectCondition(g Gomega, policy, condType string, status metav1.ConditionStatus, reason string) {
+	gotStatus, gotReason, message := policyCondition(g, policy, condType)
+	g.Expect(gotStatus).To(Equal(string(status)), "%s condition: %s", condType, message)
+	g.Expect(gotReason).To(Equal(reason), "%s condition: %s", condType, message)
+}
+
+// warningEventReasons returns the reasons of the Warning events about the policy. The policy is
+// cluster-scoped, so its events can be in any namespace.
+func warningEventReasons(g Gomega, policy string) []string {
+	cmd := exec.Command("kubectl", "get", "events", "-A",
+		"--field-selector", "involvedObject.kind=PodSweepPolicy,type=Warning,involvedObject.name="+policy,
+		"-o", `jsonpath={range .items[*]}{.reason}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	return utils.GetNonEmptyLines(output)
+}
+
+// expectEvaluatedCleanly waits until the policy is Ready, evaluated and has no protected
+// namespaces excluded, and asserts that the policy has no Warning events.
+func expectEvaluatedCleanly(policy string) {
+	By(fmt.Sprintf("verifying the conditions of the PodSweepPolicy %s", policy))
+	Eventually(func(g Gomega) {
+		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionTrue, "Validated")
+		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionTrue, "Evaluated")
+		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
+			metav1.ConditionFalse, "NoProtectedNamespaces")
+	}).Should(Succeed())
+	Expect(warningEventReasons(Default, policy)).To(BeEmpty())
+}
+
 // ensureMetricsRoleBinding creates the ClusterRoleBinding that lets the controller's service
 // account read the metrics endpoint, if it doesn't already exist (the "Manager" context's
 // metrics-endpoint spec creates the same binding, but PodSweepPolicy scenarios must not depend

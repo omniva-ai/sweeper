@@ -317,6 +317,7 @@ var _ = Describe("Manager", Ordered, func() {
 				mode:              sweeperv1alpha1.ModeReport,
 			})
 			createFailingPod(testNamespace, failingPodName, nil)
+			expectEvaluatedCleanly(policyName)
 
 			By("verifying the current-candidates gauge reflects the pod once its TTL elapses")
 			Eventually(func(g Gomega) {
@@ -344,6 +345,7 @@ var _ = Describe("Manager", Ordered, func() {
 				mode:              sweeperv1alpha1.ModeEnforce,
 			})
 			createFailingPod(testNamespace, failingPodName, nil)
+			expectEvaluatedCleanly(policyName)
 
 			By("waiting for the pod to be deleted once its TTL elapses")
 			Eventually(func(g Gomega) {
