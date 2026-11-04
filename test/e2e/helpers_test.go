@@ -97,6 +97,14 @@ type tokenRequest struct {
 	} `json:"status"`
 }
 
+// Condition reasons that the controller sets on a PodSweepPolicy.
+const (
+	reasonValidated             = "Validated"
+	reasonEvaluated             = "Evaluated"
+	reasonNoProtectedNamespaces = "NoProtectedNamespaces"
+	reasonDisabled              = "Disabled"
+)
+
 // waitForControllerPod waits until exactly one controller-manager pod that is not terminating
 // is Running, and returns its name.
 func waitForControllerPod() string {
@@ -224,6 +232,22 @@ func podExists(g Gomega, ns, name string) bool {
 	return strings.TrimSpace(output) != ""
 }
 
+// expectPodDeleted waits until the pod is gone.
+func expectPodDeleted(ns, name string) {
+	By(fmt.Sprintf("waiting for the pod %s/%s to be deleted", ns, name))
+	Eventually(func(g Gomega) {
+		g.Expect(podExists(g, ns, name)).To(BeFalse(), "pod should have been deleted")
+	}).Should(Succeed())
+}
+
+// expectPodKept asserts that the pod exists for the whole duration.
+func expectPodKept(ns, name string, duration time.Duration) {
+	By(fmt.Sprintf("verifying the pod %s/%s is not deleted", ns, name))
+	Consistently(func(g Gomega) {
+		g.Expect(podExists(g, ns, name)).To(BeTrue(), "pod should not be deleted")
+	}, duration).Should(Succeed())
+}
+
 // policyCondition returns the status, reason and message of the policy's condType condition.
 // It fails the assertion when the condition is absent.
 func policyCondition(g Gomega, policy, condType string) (status, reason, message string) {
@@ -264,12 +288,23 @@ func warningEventReasons(g Gomega, policy string) []string {
 func expectEvaluatedCleanly(policy string) {
 	By(fmt.Sprintf("verifying the conditions of the PodSweepPolicy %s", policy))
 	Eventually(func(g Gomega) {
-		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionTrue, "Validated")
-		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionTrue, "Evaluated")
+		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeReady, metav1.ConditionTrue, reasonValidated)
+		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeEvaluated, metav1.ConditionTrue, reasonEvaluated)
 		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
-			metav1.ConditionFalse, "NoProtectedNamespaces")
+			metav1.ConditionFalse, reasonNoProtectedNamespaces)
 	}).Should(Succeed())
 	Expect(warningEventReasons(Default, policy)).To(BeEmpty())
+}
+
+// policySeriesNames returns the names of the sweeper metrics that have a series for the policy.
+func policySeriesNames(output, policy string) []string {
+	var names []string
+	for _, name := range []string{currentGaugeName, deletedTotalName} {
+		if _, found := metricValue(output, name, map[string]string{policyLabel: policy}); found {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // ensureMetricsRoleBinding creates the ClusterRoleBinding that lets the controller's service
