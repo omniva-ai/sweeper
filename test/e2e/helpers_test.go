@@ -213,6 +213,42 @@ func createFailingPod(ns, name string, labels map[string]string) {
 	waitForPodPhase(ns, name, corev1.PodFailed)
 }
 
+// createEvictedPod creates a pod that no node can schedule, then sets its status to the Failed
+// phase with the reason Evicted, as the kubelet does when it evicts a pod. No kubelet owns the
+// pod, so nothing overwrites the faked status. The pod is deleted when the spec ends.
+func createEvictedPod(ns, name string) {
+	By(fmt.Sprintf("creating the pod %s/%s that no node can schedule", ns, name))
+	applyObject(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			NodeSelector:  map[string]string{"sweeper-e2e/unschedulable": "true"},
+			Containers: []corev1.Container{{
+				Name:    "never-runs",
+				Image:   "busybox:1.36",
+				Command: []string{"sh", "-c", "exit 0"},
+			}},
+		},
+	})
+	DeferCleanup(func() {
+		cmd := exec.Command("kubectl", "delete", "pod", name, "-n", ns, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	})
+	waitForPodPhase(ns, name, corev1.PodPending)
+
+	By(fmt.Sprintf("marking the pod %s/%s as evicted", ns, name))
+	cmd := exec.Command("kubectl", "patch", "pod", name, "-n", ns, "--subresource=status", "--type=merge",
+		"-p", `{"status":{"phase":"Failed","reason":"Evicted","message":"The node was low on resource: memory."}}`)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to patch the pod status")
+
+	cmd = exec.Command("kubectl", "get", "pod", name, "-n", ns, "-o", "jsonpath={.status.phase}/{.status.reason}")
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(output).To(Equal("Failed/Evicted"))
+}
+
 // waitForPodPhase waits until the pod reaches phase.
 func waitForPodPhase(ns, name string, phase corev1.PodPhase) {
 	By(fmt.Sprintf("waiting for the pod %s/%s to reach the %s phase", ns, name, phase))

@@ -533,5 +533,20 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(warningEventReasons(g, policyName)).To(ContainElement("InvalidPodSelector"))
 			}).Should(Succeed())
 		})
+
+		It("deletes an evicted pod after its TTL", func() {
+			const testNamespace, policyName = "e2e-evicted-test", "e2e-evicted"
+			createTestNamespace(testNamespace, map[string]string{scenarioLabel: policyName})
+			applyPolicy(policySpec{
+				name:              policyName,
+				namespaceSelector: map[string]string{scenarioLabel: policyName},
+				ttl:               5 * time.Second,
+				mode:              sweeperv1alpha1.ModeEnforce,
+			})
+			createEvictedPod(testNamespace, "evicted-pod")
+
+			expectPodDeleted(testNamespace, "evicted-pod")
+			expectDeletedTotal(testNamespace, policyName, 1)
+		})
 	})
 })
