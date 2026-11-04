@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"flag"
 	"slices"
 	"testing"
 )
@@ -65,5 +66,50 @@ func TestStringSliceFlagString(t *testing.T) {
 	}
 	if got := (&stringSliceFlag{}).String(); got != "" {
 		t.Errorf("String() on a zero-value flag = %q, want empty", got)
+	}
+}
+
+func TestBindNamespaceFlags(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantProtected []string
+		wantAllowed   []string
+	}{
+		{name: "defaults", wantProtected: []string{kubeSystem}},
+		{name: "protected list replaces the default",
+			args:          []string{"--protected-namespace=a,b", "--protected-namespace=c"},
+			wantProtected: []string{"a", "b", "c"}},
+		{name: "allowed list is repeatable and comma-separated",
+			args:          []string{"--allow-protected-namespace=x", "--allow-protected-namespace=y,z"},
+			wantProtected: []string{kubeSystem}, wantAllowed: []string{"x", "y", "z"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			protected, allowed := bindNamespaceFlags(fs)
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatalf("Parse(%q) returned error: %v", tt.args, err)
+			}
+			if !slices.Equal(*protected, tt.wantProtected) {
+				t.Errorf("protected = %q, want %q", *protected, tt.wantProtected)
+			}
+			if !slices.Equal(*allowed, tt.wantAllowed) {
+				t.Errorf("allowed = %q, want %q", *allowed, tt.wantAllowed)
+			}
+			if !slices.Equal(defaultProtectedNamespaces, []string{kubeSystem}) {
+				t.Errorf("defaultProtectedNamespaces = %q, want it unchanged", defaultProtectedNamespaces)
+			}
+		})
+	}
+}
+
+func TestBindNamespaceFlagsRegistersFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	bindNamespaceFlags(fs)
+	for _, name := range []string{"protected-namespace", "allow-protected-namespace"} {
+		if fs.Lookup(name) == nil {
+			t.Errorf("flag %q is not registered", name)
+		}
 	}
 }

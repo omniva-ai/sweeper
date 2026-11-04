@@ -82,6 +82,21 @@ func (f *stringSliceFlag) Set(v string) error {
 	return nil
 }
 
+// bindNamespaceFlags registers --protected-namespace and --allow-protected-namespace on fs. The
+// returned slices hold the parsed values after fs.Parse.
+func bindNamespaceFlags(fs *flag.FlagSet) (protected, allowed *[]string) {
+	protectedNamespaces := append([]string(nil), defaultProtectedNamespaces...)
+	var allowedNamespaces []string
+	fs.Var(&stringSliceFlag{values: &protectedNamespaces}, "protected-namespace",
+		"Namespace protected from sweeping regardless of any PodSweepPolicy's namespaceSelector "+
+			"(repeatable and/or comma-separated). Overrides the default list entirely. "+
+			"Default: "+strings.Join(defaultProtectedNamespaces, ","))
+	fs.Var(&stringSliceFlag{values: &allowedNamespaces}, "allow-protected-namespace",
+		"Explicitly unlock a protected namespace so PodSweepPolicy rules may evaluate it "+
+			"(repeatable and/or comma-separated).")
+	return &protectedNamespaces, &allowedNamespaces
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -97,15 +112,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	protectedNamespaces := append([]string(nil), defaultProtectedNamespaces...)
-	var allowedNamespaces []string
-	flag.Var(&stringSliceFlag{values: &protectedNamespaces}, "protected-namespace",
-		"Namespace protected from sweeping regardless of any PodSweepPolicy's namespaceSelector "+
-			"(repeatable and/or comma-separated). Overrides the default list entirely. "+
-			"Default: "+strings.Join(defaultProtectedNamespaces, ","))
-	flag.Var(&stringSliceFlag{values: &allowedNamespaces}, "allow-protected-namespace",
-		"Explicitly unlock a protected namespace so PodSweepPolicy rules may evaluate it "+
-			"(repeatable and/or comma-separated).")
+	protectedNamespaces, allowedNamespaces := bindNamespaceFlags(flag.CommandLine)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -201,8 +208,8 @@ func main() {
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
 		Recorder:            mgr.GetEventRecorderFor("sweeper"),
-		ProtectedNamespaces: protectedNamespaces,
-		AllowedNamespaces:   allowedNamespaces,
+		ProtectedNamespaces: *protectedNamespaces,
+		AllowedNamespaces:   *allowedNamespaces,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodSweepPolicy")
 		os.Exit(1)
