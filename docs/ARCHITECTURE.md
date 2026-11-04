@@ -84,6 +84,18 @@ Mode semantics are deliberately explicit, since this is the easiest thing to get
 - `enforce` — same evaluation as `report`, plus pods that have crossed their TTL are deleted, and
   the deletion counter increments.
 
+### Overlapping policies
+
+Two or more policies can select the same pod. Each policy is evaluated on its own, with its own
+TTL and mode; no policy takes priority over another:
+
+- Each policy's `sweeper_evicted_failed_pods_current` gauge counts a matching candidate, so the
+  same pod can appear in the gauge of several policies.
+- When more than one `enforce` policy has the pod past its TTL, the first delete wins. The other
+  policy's delete gets `NotFound` or `Conflict`, which is not an error and is not counted.
+- A `report` policy never deletes, so a `report` policy and an `enforce` policy can overlap
+  safely: the `report` gauge counts the pod until the `enforce` policy deletes it.
+
 ### Identifying "evicted/failed" pods
 
 A pod is a candidate if `pod.Status.Phase == v1.PodFailed` and it is not terminating
@@ -252,7 +264,8 @@ sequenceDiagram
    the TTL-based requeue is kept. If the status write on that path fails, it returns only the
    status error and no requeue. It also implements `Watcher`, registering a watch on
    `v1.Pod` (filtered to `phase == Failed` transitions) mapped back to every `PodSweepPolicy`
-   whose selectors could match it, via a controller-runtime field index, so a pod entering
+   whose selectors could match it (the map function lists all policies and matches their
+   selectors against the pod's labels and its namespace's labels), so a pod entering
    `Failed` triggers re-evaluation without waiting for the next poll.
 3. **`Delete`** is a no-op on `ValidationSubReconciler`, and on `EvaluationSubReconciler` purges
    that policy's metric series — deleting a `PodSweepPolicy` only stops its evaluation; it must
@@ -338,9 +351,27 @@ that pull request.
 - **Unit tests** — `sigs.k8s.io/controller-runtime/pkg/envtest`, table-driven, one file per
   sub-reconciler plus dedicated tests for the protected-namespace gate, the failed-since
   algorithm (`TestFailedSince`) and the first-seen tracker (`TestFirstSeenTracker_*`).
+  `cmd/main_test.go` covers the `--protected-namespace` and `--allow-protected-namespace` flag
+  parsing.
 - **e2e tests** — `kind`-based, under `test/e2e`: build the image, load it into a `kind` cluster,
-  apply the CRDs and sample `PodSweepPolicy` objects, and assert on both `report` (pod survives,
-  gauge increments) and `enforce` (pod is deleted, counter increments) behavior.
+  deploy the controller, and apply `PodSweepPolicy` objects built inline by each spec (not the
+  samples under `config/samples`). The specs cover:
+  - `report`: the pod survives and the gauge counts it.
+  - `enforce`: the pod is deleted and the counter increments.
+  - Conditions: `Ready`, `Evaluated` and `NamespacesSkippedProtected` on the happy path, and no
+    Warning events.
+  - Switching from `enforce` to `disable`: the `Disabled` conditions, no further deletes, and no
+    metric series for the policy.
+  - Overlapping `report` and `enforce` policies on one pod.
+  - Deleting policies: the finalizer completes, the metric series are removed, and pods stay.
+  - An invalid pod selector value: `Ready=False/InvalidPodSelector`, `Evaluated=False/NotReady`
+    and a Warning event.
+  - An evicted pod (faked through the pod status subresource): deleted after its TTL from the
+    first-seen time.
+  - Protected namespaces: `kube-system` is skipped by default with a
+    `ProtectedNamespacesExcluded` condition and Warning event; after a restart of the manager
+    with `--protected-namespace` and `--allow-protected-namespace`, only the allowed namespace is
+    swept.
 
 ### CI (`.github/workflows/`)
 
