@@ -543,11 +543,14 @@ var _ = Describe("Manager", Ordered, func() {
 			applyPolicy(policySpec{
 				name:              policyName,
 				namespaceSelector: map[string]string{scenarioLabel: policyName},
-				ttl:               5 * time.Second,
+				ttl:               20 * time.Second,
 				mode:              sweeperv1alpha1.ModeEnforce,
 			})
 			createEvictedPod(testNamespace, "evicted-pod")
 
+			// The pod has no container statuses, so its TTL counts from when the controller first
+			// sees it as Failed, which is after the status patch.
+			expectPodKept(testNamespace, "evicted-pod", 10*time.Second)
 			expectPodDeleted(testNamespace, "evicted-pod")
 			expectDeletedTotal(testNamespace, policyName, 1)
 		})
