@@ -389,7 +389,8 @@ func warningEventReasons(g Gomega, policy string) []string {
 }
 
 // expectEvaluatedCleanly waits until the policy is Ready, evaluated and has no protected
-// namespaces excluded, and asserts that the policy has no Warning events.
+// namespaces excluded, then asserts that no Warning event appears for the policy. The event
+// recorder writes events asynchronously, so one read right after the conditions can miss one.
 func expectEvaluatedCleanly(policy string) {
 	By(fmt.Sprintf("verifying the conditions of the PodSweepPolicy %s", policy))
 	Eventually(func(g Gomega) {
@@ -398,7 +399,10 @@ func expectEvaluatedCleanly(policy string) {
 		expectCondition(g, policy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
 			metav1.ConditionFalse, reasonNoProtectedNamespaces)
 	}).Should(Succeed())
-	Expect(warningEventReasons(Default, policy)).To(BeEmpty())
+	By(fmt.Sprintf("verifying the PodSweepPolicy %s records no Warning events", policy))
+	Consistently(func(g Gomega) {
+		g.Expect(warningEventReasons(g, policy)).To(BeEmpty())
+	}, 5*time.Second).Should(Succeed())
 }
 
 // policySeriesNames returns the names of the sweeper metrics that have a series for the policy.
