@@ -24,6 +24,11 @@ then from the repository root:
 mise install
 ```
 
+The `make` targets run `golangci-lint`, `controller-gen`, `kustomize` and `setup-envtest` from
+your `PATH` and fail with a hint if one is missing. Run `mise install` again whenever `mise.toml`
+changes. A `bin/` directory left over from older checkouts may hold stale tool copies; `make` no
+longer uses them, so you can delete it.
+
 You also need Docker (or a compatible container runtime) for image builds and the e2e tests.
 
 ## Making a change
@@ -40,12 +45,25 @@ You also need Docker (or a compatible container runtime) for image builds and th
    make test                 # envtest-backed unit tests
    make test-e2e             # kind-based e2e tests (optional locally, always run in CI)
    make manifests generate   # regenerate CRDs, RBAC and deepcopy code; commit the result
+   make check-go-version     # Go version matches across mise.toml, go.mod and Dockerfile
    ```
 
 5. Open a pull request against `main` and fill in the template.
 
 Every Go source file must start with the Apache 2.0 header in
 [`hack/boilerplate.go.txt`](hack/boilerplate.go.txt).
+
+## Updating Go
+
+The Go version appears in three files, and all three must hold the same version:
+
+- `go = "..."` in [`mise.toml`](mise.toml)
+- the `go` directive in [`go.mod`](go.mod)
+- the `golang:` builder image in the [`Dockerfile`](Dockerfile)
+
+Renovate does not bump Go. When Dependabot opens a pull request for the `golang` image, add the
+matching `mise.toml` and `go.mod` changes to it. `make check-go-version` checks the three files,
+and CI runs it. See [ADR-0005](docs/adr/0005-mise-single-source-of-tool-versions.md).
 
 ## Commit messages
 

@@ -114,8 +114,8 @@ is a starting `PodSweepPolicy` you can apply to a cluster.
 
 ### Prerequisites
 
-Toolchain versions (Go, kind, kubectl, golangci-lint, controller-gen,
-setup-envtest) are pinned via [mise](https://mise.jdx.dev/) (`mise.toml`):
+Toolchain versions (Go, kind, kubectl, kustomize, golangci-lint,
+controller-gen, setup-envtest) are pinned via [mise](https://mise.jdx.dev/) (`mise.toml`):
 
 ```
 mise install
