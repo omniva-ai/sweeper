@@ -480,15 +480,18 @@ func stopMetricsProbe(podName string) {
 }
 
 // scrapeMetrics curls the metrics endpoint from inside the given probe pod and returns the raw
-// response body.
-func scrapeMetrics(probePodName, token string) string {
+// response body. It fails g on an HTTP error or a body without the controller-runtime metrics, so
+// that a missing series means the series is absent and not that the scrape failed.
+func scrapeMetrics(g Gomega, probePodName, token string) string {
 	cmd := exec.Command("kubectl", "exec", probePodName, "-n", namespace, "--",
-		"curl", "-s", "-k",
+		"curl", "-sS", "-f", "-k",
 		"-H", fmt.Sprintf("Authorization: Bearer %s", token),
 		fmt.Sprintf("https://%s.%s.svc.cluster.local:8443/metrics", metricsServiceName, namespace),
 	)
 	output, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to curl metrics endpoint")
+	g.Expect(err).NotTo(HaveOccurred(), "Failed to curl metrics endpoint")
+	g.Expect(output).To(ContainSubstring("controller_runtime_reconcile_total"),
+		"metrics response has no controller-runtime metrics")
 	return output
 }
 

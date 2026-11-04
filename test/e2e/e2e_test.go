@@ -295,14 +295,14 @@ var _ = Describe("Manager", Ordered, func() {
 
 		var metricsToken string
 
-		scrape := func() string {
-			return scrapeMetrics(metricsProbePodName, metricsToken)
+		scrape := func(g Gomega) string {
+			return scrapeMetrics(g, metricsProbePodName, metricsToken)
 		}
 
 		expectDeletedTotal := func(testNamespace, policyName string, want float64) {
 			By(fmt.Sprintf("verifying the deleted-pods counter of %s reaches %v", policyName, want))
 			Eventually(func(g Gomega) {
-				value, found := metricValue(scrape(), deletedTotalName,
+				value, found := metricValue(scrape(g), deletedTotalName,
 					map[string]string{namespaceLabel: testNamespace, policyLabel: policyName})
 				g.Expect(found).To(BeTrue(), "counter series not yet present")
 				g.Expect(value).To(Equal(want))
@@ -312,7 +312,7 @@ var _ = Describe("Manager", Ordered, func() {
 		expectNoPolicySeries := func(policyName string) {
 			By(fmt.Sprintf("verifying no metric series remain for %s", policyName))
 			Eventually(func(g Gomega) {
-				g.Expect(policySeriesNames(scrape(), policyName)).To(BeEmpty())
+				g.Expect(policySeriesNames(scrape(g), policyName)).To(BeEmpty())
 			}).Should(Succeed())
 		}
 
@@ -346,7 +346,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("verifying the current-candidates gauge reflects the pod once its TTL elapses")
 			Eventually(func(g Gomega) {
-				value, found := metricValue(scrape(), currentGaugeName,
+				value, found := metricValue(scrape(g), currentGaugeName,
 					map[string]string{namespaceLabel: testNamespace, policyLabel: policyName})
 				g.Expect(found).To(BeTrue(), "gauge series not yet present")
 				g.Expect(value).To(BeNumerically(">=", 1))
@@ -435,7 +435,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("verifying the report policy counts the pod before the enforce policy deletes it")
 			Eventually(func(g Gomega) {
-				value, found := metricValue(scrape(), currentGaugeName,
+				value, found := metricValue(scrape(g), currentGaugeName,
 					map[string]string{namespaceLabel: testNamespace, policyLabel: reportPolicy})
 				g.Expect(found).To(BeTrue(), "gauge series not yet present")
 				g.Expect(value).To(BeNumerically(">=", 1))
@@ -447,8 +447,10 @@ var _ = Describe("Manager", Ordered, func() {
 			expectDeletedTotal(testNamespace, enforcePolicy, 1)
 
 			By("verifying the report policy never counts a delete")
-			_, found := metricValue(scrape(), deletedTotalName, map[string]string{policyLabel: reportPolicy})
-			Expect(found).To(BeFalse(), "report policy must not have a deleted-pods series")
+			Eventually(func(g Gomega) {
+				_, found := metricValue(scrape(g), deletedTotalName, map[string]string{policyLabel: reportPolicy})
+				g.Expect(found).To(BeFalse(), "report policy must not have a deleted-pods series")
+			}).Should(Succeed())
 		})
 
 		It("removes metric series and keeps pods when a policy is deleted", func() {
@@ -484,7 +486,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("verifying the report policy gauge counts the kept pod")
 			Eventually(func(g Gomega) {
-				value, found := metricValue(scrape(), currentGaugeName,
+				value, found := metricValue(scrape(g), currentGaugeName,
 					map[string]string{namespaceLabel: testNamespace, policyLabel: reportPolicy})
 				g.Expect(found).To(BeTrue(), "gauge series not yet present")
 				g.Expect(value).To(BeNumerically(">=", 1))
@@ -602,9 +604,11 @@ var _ = Describe("Manager", Ordered, func() {
 				expectPodKept(kubeSystem, kubeSystemPod, 15*time.Second)
 
 				By("verifying the policy has no gauge series for kube-system")
-				_, found := metricValue(scrape(), currentGaugeName,
-					map[string]string{namespaceLabel: kubeSystem, policyLabel: kubeSystemPolicy})
-				Expect(found).To(BeFalse())
+				Eventually(func(g Gomega) {
+					_, found := metricValue(scrape(g), currentGaugeName,
+						map[string]string{namespaceLabel: kubeSystem, policyLabel: kubeSystemPolicy})
+					g.Expect(found).To(BeFalse())
+				}).Should(Succeed())
 			})
 
 			It("unlocks an allowed protected namespace", func() {
