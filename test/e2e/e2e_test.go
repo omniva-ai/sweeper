@@ -27,6 +27,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
 	"github.com/omniva-ai/sweeper/test/utils"
@@ -54,6 +55,8 @@ const scenarioLabel = "sweeper-e2e-scenario"
 const (
 	currentGaugeName = "sweeper_evicted_failed_pods_current"
 	deletedTotalName = "sweeper_pods_deleted_total"
+	namespaceLabel   = "namespace"
+	policyLabel      = "policy"
 )
 
 var _ = Describe("Manager", Ordered, func() {
@@ -291,6 +294,27 @@ var _ = Describe("Manager", Ordered, func() {
 
 		var metricsToken string
 
+		scrape := func() string {
+			return scrapeMetrics(metricsProbePodName, metricsToken)
+		}
+
+		expectDeletedTotal := func(testNamespace, policyName string, want float64) {
+			By(fmt.Sprintf("verifying the deleted-pods counter of %s reaches %v", policyName, want))
+			Eventually(func(g Gomega) {
+				value, found := metricValue(scrape(), deletedTotalName,
+					map[string]string{namespaceLabel: testNamespace, policyLabel: policyName})
+				g.Expect(found).To(BeTrue(), "counter series not yet present")
+				g.Expect(value).To(Equal(want))
+			}).Should(Succeed())
+		}
+
+		expectNoPolicySeries := func(policyName string) {
+			By(fmt.Sprintf("verifying no metric series remain for %s", policyName))
+			Eventually(func(g Gomega) {
+				g.Expect(policySeriesNames(scrape(), policyName)).To(BeEmpty())
+			}).Should(Succeed())
+		}
+
 		BeforeAll(func() {
 			ensureMetricsRoleBinding()
 
@@ -321,18 +345,13 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("verifying the current-candidates gauge reflects the pod once its TTL elapses")
 			Eventually(func(g Gomega) {
-				output := scrapeMetrics(metricsProbePodName, metricsToken)
-				value, found := metricValue(output, currentGaugeName,
-					map[string]string{"namespace": testNamespace, "policy": policyName})
+				value, found := metricValue(scrape(), currentGaugeName,
+					map[string]string{namespaceLabel: testNamespace, policyLabel: policyName})
 				g.Expect(found).To(BeTrue(), "gauge series not yet present")
 				g.Expect(value).To(BeNumerically(">=", 1))
 			}).Should(Succeed())
 
-			By("verifying the pod is never deleted in report mode")
-			Consistently(func(g Gomega) {
-				g.Expect(podExists(g, testNamespace, failingPodName)).To(BeTrue(),
-					"pod should not be deleted in report mode")
-			}, 15*time.Second).Should(Succeed())
+			expectPodKept(testNamespace, failingPodName, 15*time.Second)
 		})
 
 		It("deletes TTL-expired pods and increments the deletion counter in enforce mode", func() {
@@ -347,19 +366,45 @@ var _ = Describe("Manager", Ordered, func() {
 			createFailingPod(testNamespace, failingPodName, nil)
 			expectEvaluatedCleanly(policyName)
 
-			By("waiting for the pod to be deleted once its TTL elapses")
+			expectPodDeleted(testNamespace, failingPodName)
+			expectDeletedTotal(testNamespace, policyName, 1)
+		})
+
+		It("stops deleting after switching from enforce to disable", func() {
+			const testNamespace, policyName = "e2e-disable-test", "e2e-disable"
+			scenario := map[string]string{scenarioLabel: policyName}
+			createTestNamespace(testNamespace, scenario)
+			applyPolicy(policySpec{
+				name:              policyName,
+				namespaceSelector: scenario,
+				podSelector:       scenario,
+				ttl:               5 * time.Second,
+				mode:              sweeperv1alpha1.ModeEnforce,
+			})
+
+			createFailingPod(testNamespace, "pod-a", scenario)
+			expectPodDeleted(testNamespace, "pod-a")
+			expectDeletedTotal(testNamespace, policyName, 1)
+
+			By("switching the policy to disable mode")
+			cmd := exec.Command("kubectl", "patch", "podsweeppolicy", policyName,
+				"--type=merge", "-p", `{"spec":{"mode":"disable"}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch the PodSweepPolicy mode")
+
+			By("verifying the conditions report the disabled policy")
 			Eventually(func(g Gomega) {
-				g.Expect(podExists(g, testNamespace, failingPodName)).To(BeFalse(), "pod should have been deleted")
+				expectCondition(g, policyName, sweeperv1alpha1.ConditionTypeReady,
+					metav1.ConditionTrue, reasonDisabled)
+				expectCondition(g, policyName, sweeperv1alpha1.ConditionTypeEvaluated,
+					metav1.ConditionFalse, reasonDisabled)
+				expectCondition(g, policyName, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
+					metav1.ConditionFalse, reasonDisabled)
 			}).Should(Succeed())
 
-			By("verifying the deleted-pods counter incremented")
-			Eventually(func(g Gomega) {
-				output := scrapeMetrics(metricsProbePodName, metricsToken)
-				value, found := metricValue(output, deletedTotalName,
-					map[string]string{"namespace": testNamespace, "policy": policyName})
-				g.Expect(found).To(BeTrue(), "counter series not yet present")
-				g.Expect(value).To(Equal(float64(1)))
-			}).Should(Succeed())
+			createFailingPod(testNamespace, "pod-b", scenario)
+			expectPodKept(testNamespace, "pod-b", 15*time.Second)
+			expectNoPolicySeries(policyName)
 		})
 	})
 })
