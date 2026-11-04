@@ -22,6 +22,7 @@ violate one of the invariants in `ARCHITECTURE.md` must update that document fir
 make lint
 make test
 make manifests generate   # commit any regenerated files
+make check-go-version
 ```
 
 Every Go source file carries the Apache 2.0 header from `hack/boilerplate.go.txt`.

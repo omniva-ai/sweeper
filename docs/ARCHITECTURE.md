@@ -313,10 +313,25 @@ these needs to stop and either be redesigned or have this doc explicitly updated
 
 ### Toolchain: mise
 
-`mise.toml` pins Go, `controller-gen`, `golangci-lint`, `kind`, `kubectl`, `setup-envtest` (for the
-envtest binaries unit tests need), and the release and CI tools (`oras`, `cosign`, `gitleaks`,
-`actionlint`). CI installs the same pinned versions through `jdx/mise-action`, so local and CI
-toolchains match.
+`mise.toml` is the only place that pins tool versions (see
+[ADR-0005](adr/0005-mise-single-source-of-tool-versions.md)). It pins Go, `controller-gen`,
+`golangci-lint`, `kind`, `kubectl`, `kustomize`, `setup-envtest` (for the envtest binaries unit
+tests need), and the release and CI tools (`oras`, `cosign`, `gitleaks`, `actionlint`).
+
+The `Makefile` runs these tools from `PATH`; it does not install its own copies into `bin/`. A
+target whose tool is missing fails and tells you to run `mise install`. CI installs the same
+pinned versions through `jdx/mise-action`, so `make` uses the same binaries locally and in CI.
+Only the envtest Kubernetes assets download into `bin/`, at the version derived from `k8s.io/api`
+in `go.mod`.
+
+Go is pinned in three files that must agree: `mise.toml`, the `go` directive in `go.mod`, and the
+`golang:` builder image in the `Dockerfile`. `make check-go-version` (`hack/check-go-version.sh`)
+fails if they differ, and the CI `lint` job runs it.
+
+Renovate (`renovate.json`) updates `mise.toml` weekly in one grouped pull request, except Go.
+Dependabot updates Go modules, GitHub Actions and Docker images. A Dependabot pull request for the
+`golang` image is the trigger for a Go bump: add the matching `mise.toml` and `go.mod` changes to
+that pull request.
 
 ### Tests
 
@@ -329,8 +344,8 @@ toolchains match.
 
 ### CI (`.github/workflows/`)
 
-`ci.yml` runs on every pull request and push to `main`, with these jobs: `lint` (`golangci-lint`
-and `actionlint`), `gitleaks`, `build` (`make build`, then a check that generated files are
+`ci.yml` runs on every pull request and push to `main`, with these jobs: `lint` (`golangci-lint`,
+`make check-go-version` and `actionlint`), `gitleaks`, `build` (`make build`, then a check that generated files are
 committed), `test` (`go test -race` via envtest), and `e2e` (spin up `kind`, run `test/e2e`).
 `codeql.yml` and `scorecard.yml` add CodeQL and OpenSSF Scorecard analysis.
 
