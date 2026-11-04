@@ -406,5 +406,48 @@ var _ = Describe("Manager", Ordered, func() {
 			expectPodKept(testNamespace, "pod-b", 15*time.Second)
 			expectNoPolicySeries(policyName)
 		})
+
+		It("evaluates overlapping policies independently", func() {
+			const (
+				testNamespace = "e2e-overlap-test"
+				reportPolicy  = "e2e-overlap-report"
+				enforcePolicy = "e2e-overlap-enforce"
+			)
+			scenario := map[string]string{scenarioLabel: "e2e-overlap"}
+			createTestNamespace(testNamespace, scenario)
+			applyPolicy(policySpec{
+				name:              reportPolicy,
+				namespaceSelector: scenario,
+				podSelector:       scenario,
+				ttl:               5 * time.Second,
+				mode:              sweeperv1alpha1.ModeReport,
+			})
+			// The longer TTL gives the report policy time to count the pod before the delete.
+			applyPolicy(policySpec{
+				name:              enforcePolicy,
+				namespaceSelector: scenario,
+				podSelector:       scenario,
+				ttl:               30 * time.Second,
+				mode:              sweeperv1alpha1.ModeEnforce,
+			})
+			createFailingPod(testNamespace, failingPodName, scenario)
+
+			By("verifying the report policy counts the pod before the enforce policy deletes it")
+			Eventually(func(g Gomega) {
+				value, found := metricValue(scrape(), currentGaugeName,
+					map[string]string{namespaceLabel: testNamespace, policyLabel: reportPolicy})
+				g.Expect(found).To(BeTrue(), "gauge series not yet present")
+				g.Expect(value).To(BeNumerically(">=", 1))
+				g.Expect(podExists(g, testNamespace, failingPodName)).To(BeTrue(),
+					"pod was deleted before the report policy counted it")
+			}).Should(Succeed())
+
+			expectPodDeleted(testNamespace, failingPodName)
+			expectDeletedTotal(testNamespace, enforcePolicy, 1)
+
+			By("verifying the report policy never counts a delete")
+			_, found := metricValue(scrape(), deletedTotalName, map[string]string{policyLabel: reportPolicy})
+			Expect(found).To(BeFalse(), "report policy must not have a deleted-pods series")
+		})
 	})
 })
