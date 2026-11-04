@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["mise"],
+  "schedule": ["before 6am on monday"],
+  "commitMessagePrefix": "build(deps):",
+  "packageRules": [
+    {
+      "matchManagers": ["mise"],
+      "groupName": "mise tools",
+      "separateMajorMinor": false
+    },
+    {
+      "matchManagers": ["mise"],
+      "matchDepNames": ["go"],
+      "enabled": false
+    }
+  ]
+}
