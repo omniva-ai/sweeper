@@ -508,5 +508,30 @@ var _ = Describe("Manager", Ordered, func() {
 			expectNoPolicySeries(reportPolicy)
 			expectPodKept(testNamespace, "keep-pod", 10*time.Second)
 		})
+
+		It("reports an invalid pod selector through conditions and a Warning event", func() {
+			const policyName = "e2e-invalid-selector"
+			// The CRD schema accepts any matchLabels value, so only the controller rejects this one.
+			applyPolicy(policySpec{
+				name:              policyName,
+				namespaceSelector: map[string]string{scenarioLabel: policyName},
+				podSelector:       map[string]string{"app": "not a valid value!"},
+				ttl:               5 * time.Second,
+				mode:              sweeperv1alpha1.ModeReport,
+			})
+
+			By("verifying the conditions report the invalid pod selector")
+			Eventually(func(g Gomega) {
+				expectCondition(g, policyName, sweeperv1alpha1.ConditionTypeReady,
+					metav1.ConditionFalse, "InvalidPodSelector")
+				expectCondition(g, policyName, sweeperv1alpha1.ConditionTypeEvaluated,
+					metav1.ConditionFalse, "NotReady")
+			}).Should(Succeed())
+
+			By("verifying a Warning event reports the invalid pod selector")
+			Eventually(func(g Gomega) {
+				g.Expect(warningEventReasons(g, policyName)).To(ContainElement("InvalidPodSelector"))
+			}).Should(Succeed())
+		})
 	})
 })
