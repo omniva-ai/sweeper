@@ -174,3 +174,4 @@ Sweeper is licensed under the [Apache License 2.0](LICENSE).
 - [`docs/adr/0002-sub-reconciler-pattern.md`](docs/adr/0002-sub-reconciler-pattern.md) — sub-reconciler pattern and jitter package
 - [`docs/adr/0003-oci-manifest-release.md`](docs/adr/0003-oci-manifest-release.md) — OCI-packaged manifest release artifact
 - [`docs/adr/0004-failed-since-timestamp.md`](docs/adr/0004-failed-since-timestamp.md) — failed-since from failure signals and an in-memory first-seen time
+- [`docs/adr/0005-mise-single-source-of-tool-versions.md`](docs/adr/0005-mise-single-source-of-tool-versions.md) — `mise.toml` as the single source of tool versions
