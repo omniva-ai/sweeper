@@ -89,12 +89,13 @@ Mode semantics are deliberately explicit, since this is the easiest thing to get
 Two or more policies can select the same pod. Each policy is evaluated on its own, with its own
 TTL and mode; no policy takes priority over another:
 
-- Each policy's `sweeper_evicted_failed_pods_current` gauge counts a matching candidate, so the
-  same pod can appear in the gauge of several policies.
+- Each policy's `sweeper_evicted_failed_pods_current` gauge counts a matching candidate once it is
+  past that policy's TTL, so the same pod can appear in the gauge of several policies.
 - When more than one `enforce` policy has the pod past its TTL, the first delete wins. The other
   policy's delete gets `NotFound` or `Conflict`, which is not an error and is not counted.
 - A `report` policy never deletes, so a `report` policy and an `enforce` policy can overlap
-  safely: the `report` gauge counts the pod until the `enforce` policy deletes it.
+  safely: once the pod is past the `report` TTL, the `report` gauge counts it until the `enforce`
+  policy deletes it.
 
 ### Identifying "evicted/failed" pods
 
