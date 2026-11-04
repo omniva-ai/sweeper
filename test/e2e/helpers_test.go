@@ -1,0 +1,338 @@
+//go:build e2e
+// +build e2e
+
+/*
+Copyright 2026 Omniva.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	sweeperv1alpha1 "github.com/omniva-ai/sweeper/api/v1alpha1"
+	"github.com/omniva-ai/sweeper/test/utils"
+)
+
+// serviceAccountToken returns a token for the specified service account in the given namespace.
+// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
+// and parsing the resulting token from the API response.
+func serviceAccountToken() (string, error) {
+	const tokenRequestRawString = `{
+		"apiVersion": "authentication.k8s.io/v1",
+		"kind": "TokenRequest"
+	}`
+
+	// Temporary file to store the token request
+	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
+	tokenRequestFile := filepath.Join("/tmp", secretName)
+	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
+	if err != nil {
+		return "", err
+	}
+
+	var out string
+	verifyTokenCreation := func(g Gomega) {
+		// Execute kubectl command to create the token
+		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
+			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
+			namespace,
+			serviceAccountName,
+		), "-f", tokenRequestFile)
+
+		output, err := cmd.CombinedOutput()
+		g.Expect(err).NotTo(HaveOccurred())
+
+		// Parse the JSON output to extract the token
+		var token tokenRequest
+		err = json.Unmarshal(output, &token)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		out = token.Status.Token
+	}
+	Eventually(verifyTokenCreation).Should(Succeed())
+
+	return out, err
+}
+
+// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
+func getMetricsOutput() string {
+	By("getting the curl-metrics logs")
+	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+	metricsOutput, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
+	Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+	return metricsOutput
+}
+
+// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
+// containing only the token field that we need to extract.
+type tokenRequest struct {
+	Status struct {
+		Token string `json:"token"`
+	} `json:"status"`
+}
+
+// waitForControllerPod waits until exactly one controller-manager pod that is not terminating
+// is Running, and returns its name.
+func waitForControllerPod() string {
+	var podName string
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get",
+			"pods", "-l", "control-plane=controller-manager",
+			"-o", "go-template={{ range .items }}"+
+				"{{ if not .metadata.deletionTimestamp }}"+
+				"{{ .metadata.name }}"+
+				"{{ \"\\n\" }}{{ end }}{{ end }}",
+			"-n", namespace,
+		)
+		podOutput, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
+		podNames := utils.GetNonEmptyLines(podOutput)
+		g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
+		g.Expect(podNames[0]).To(ContainSubstring("controller-manager"))
+
+		cmd = exec.Command("kubectl", "get",
+			"pods", podNames[0], "-o", "jsonpath={.status.phase}",
+			"-n", namespace,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
+		podName = podNames[0]
+	}).Should(Succeed())
+	return podName
+}
+
+// applyObject applies obj, encoded as JSON, with kubectl apply.
+func applyObject(obj any) {
+	manifest, err := json.Marshal(obj)
+	Expect(err).NotTo(HaveOccurred())
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(string(manifest))
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply %s", manifest)
+}
+
+// createTestNamespace creates a namespace with the given labels and deletes it when the spec ends.
+func createTestNamespace(name string, labels map[string]string) {
+	By(fmt.Sprintf("creating the test namespace %s", name))
+	applyObject(&corev1.Namespace{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+	})
+	DeferCleanup(func() {
+		cmd := exec.Command("kubectl", "delete", "ns", name, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	})
+}
+
+// policySpec describes a PodSweepPolicy that selects namespaces and pods by matchLabels.
+type policySpec struct {
+	name              string
+	namespaceSelector map[string]string
+	podSelector       map[string]string
+	ttl               time.Duration
+	mode              string
+}
+
+// applyPolicy applies p and deletes the policy when the spec ends.
+func applyPolicy(p policySpec) {
+	By(fmt.Sprintf("applying the %s-mode PodSweepPolicy %s", p.mode, p.name))
+	applyObject(&sweeperv1alpha1.PodSweepPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: sweeperv1alpha1.GroupVersion.String(),
+			Kind:       "PodSweepPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: p.name},
+		Spec: sweeperv1alpha1.PodSweepPolicySpec{
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: p.namespaceSelector},
+			PodSelector:       &metav1.LabelSelector{MatchLabels: p.podSelector},
+			TTL:               metav1.Duration{Duration: p.ttl},
+			Mode:              p.mode,
+		},
+	})
+	DeferCleanup(func() {
+		cmd := exec.Command("kubectl", "delete", "podsweeppolicy", p.name, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	})
+}
+
+// createFailingPod creates a pod whose only container exits 1, waits until the pod is Failed,
+// and deletes the pod when the spec ends.
+func createFailingPod(ns, name string, labels map[string]string) {
+	By(fmt.Sprintf("creating the pod %s/%s that fails immediately", ns, name))
+	applyObject(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:    "fail",
+				Image:   "busybox:1.36",
+				Command: []string{"sh", "-c", "exit 1"},
+			}},
+		},
+	})
+	DeferCleanup(func() {
+		cmd := exec.Command("kubectl", "delete", "pod", name, "-n", ns, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	})
+	waitForPodPhase(ns, name, corev1.PodFailed)
+}
+
+// waitForPodPhase waits until the pod reaches phase.
+func waitForPodPhase(ns, name string, phase corev1.PodPhase) {
+	By(fmt.Sprintf("waiting for the pod %s/%s to reach the %s phase", ns, name, phase))
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pod", name, "-n", ns, "-o", "jsonpath={.status.phase}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal(string(phase)))
+	}).Should(Succeed())
+}
+
+// podExists reports whether the pod exists. It fails the assertion on any kubectl error.
+func podExists(g Gomega, ns, name string) bool {
+	cmd := exec.Command("kubectl", "get", "pod", name, "-n", ns, "--ignore-not-found", "-o", "name")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	return strings.TrimSpace(output) != ""
+}
+
+// ensureMetricsRoleBinding creates the ClusterRoleBinding that lets the controller's service
+// account read the metrics endpoint, if it doesn't already exist (the "Manager" context's
+// metrics-endpoint spec creates the same binding, but PodSweepPolicy scenarios must not depend
+// on that spec having run first).
+func ensureMetricsRoleBinding() {
+	cmd := exec.Command("kubectl", "get", "clusterrolebinding", metricsRoleBindingName)
+	if _, err := utils.Run(cmd); err == nil {
+		return
+	}
+
+	By("creating a ClusterRoleBinding for the service account to allow access to metrics")
+	cmd = exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
+		"--clusterrole=sweeper-metrics-reader",
+		fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
+	)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+}
+
+// startMetricsProbe creates a long-lived pod that can be curled repeatedly via kubectl exec, so
+// scenarios can poll a metric value without paying pod-creation cost on every Eventually
+// iteration.
+func startMetricsProbe(podName string) {
+	By(fmt.Sprintf("creating the %s pod to poll the metrics endpoint", podName))
+	cmd := exec.Command("kubectl", "run", podName, "--restart=Never",
+		"--namespace", namespace,
+		"--image=curlimages/curl:8.22.0",
+		"--overrides",
+		`{
+			"spec": {
+				"containers": [{
+					"name": "curl",
+					"image": "curlimages/curl:8.22.0",
+					"command": ["sleep", "3600"],
+					"securityContext": {
+						"readOnlyRootFilesystem": true,
+						"allowPrivilegeEscalation": false,
+						"capabilities": {
+							"drop": ["ALL"]
+						},
+						"runAsNonRoot": true,
+						"runAsUser": 1000,
+						"seccompProfile": {
+							"type": "RuntimeDefault"
+						}
+					}
+				}]
+			}
+		}`,
+	)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create %s pod", podName))
+
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", podName, "-o", "jsonpath={.status.phase}", "-n", namespace)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Running"))
+	}).Should(Succeed())
+}
+
+// stopMetricsProbe deletes the pod started by startMetricsProbe.
+func stopMetricsProbe(podName string) {
+	cmd := exec.Command("kubectl", "delete", "pod", podName, "-n", namespace, "--ignore-not-found")
+	_, _ = utils.Run(cmd)
+}
+
+// scrapeMetrics curls the metrics endpoint from inside the given probe pod and returns the raw
+// response body.
+func scrapeMetrics(probePodName, token string) string {
+	cmd := exec.Command("kubectl", "exec", probePodName, "-n", namespace, "--",
+		"curl", "-s", "-k",
+		"-H", fmt.Sprintf("Authorization: Bearer %s", token),
+		fmt.Sprintf("https://%s.%s.svc.cluster.local:8443/metrics", metricsServiceName, namespace),
+	)
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to curl metrics endpoint")
+	return output
+}
+
+// metricValue scans Prometheus text-exposition output for a series matching metricName and
+// every given label, returning its value. It reports found=false if no matching series exists
+// yet (e.g. before the controller has evaluated the policy for the first time).
+func metricValue(output, metricName string, labels map[string]string) (value float64, found bool) {
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, metricName+"{") {
+			continue
+		}
+
+		matchesAllLabels := true
+		for k, v := range labels {
+			if !strings.Contains(line, fmt.Sprintf(`%s="%s"`, k, v)) {
+				matchesAllLabels = false
+				break
+			}
+		}
+		if !matchesAllLabels {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		val, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		return val, true
+	}
+	return 0, false
+}
