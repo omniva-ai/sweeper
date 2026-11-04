@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -547,6 +548,93 @@ var _ = Describe("Manager", Ordered, func() {
 
 			expectPodDeleted(testNamespace, "evicted-pod")
 			expectDeletedTotal(testNamespace, policyName, 1)
+		})
+
+		// The allow spec restarts the manager with other flags, so this context runs last.
+		Context("protected namespaces", Ordered, func() {
+			const (
+				namespaceNameLabel   = "kubernetes.io/metadata.name"
+				kubeSystem           = "kube-system"
+				kubeSystemPolicy     = "e2e-protected-default"
+				kubeSystemPod        = "sweeper-e2e-protected-pod"
+				lockedNamespace      = "sweeper-e2e-locked"
+				lockedPolicy         = "e2e-protected-locked"
+				allowedNamespace     = "sweeper-e2e-protected"
+				allowedPolicy        = "e2e-protected-allowed"
+				protectedPodSelector = "protected-default"
+			)
+
+			var restoreManagerArgs func()
+
+			// A DeferCleanup in the last spec runs after the outer AfterAll has undeployed the
+			// manager, so the args are restored here instead.
+			AfterAll(func() {
+				if restoreManagerArgs != nil {
+					restoreManagerArgs()
+				}
+			})
+
+			applyNamespacePolicy := func(policyName, ns string, podSelector map[string]string) {
+				applyPolicy(policySpec{
+					name:              policyName,
+					namespaceSelector: map[string]string{namespaceNameLabel: ns},
+					podSelector:       podSelector,
+					ttl:               5 * time.Second,
+					mode:              sweeperv1alpha1.ModeEnforce,
+				})
+			}
+
+			setUpKubeSystemScenario := func() {
+				podLabels := map[string]string{scenarioLabel: protectedPodSelector}
+				createFailingPod(kubeSystem, kubeSystemPod, podLabels)
+				applyNamespacePolicy(kubeSystemPolicy, kubeSystem, podLabels)
+				expectProtectedSkip(kubeSystemPolicy, kubeSystem)
+			}
+
+			It("skips kube-system by default", func() {
+				setUpKubeSystemScenario()
+
+				By("verifying a Warning event reports the excluded namespace")
+				Eventually(func(g Gomega) {
+					g.Expect(warningEventReasons(g, kubeSystemPolicy)).To(ContainElement(reasonProtectedExcluded))
+				}).Should(Succeed())
+
+				expectPodKept(kubeSystem, kubeSystemPod, 15*time.Second)
+
+				By("verifying the policy has no gauge series for kube-system")
+				_, found := metricValue(scrape(), currentGaugeName,
+					map[string]string{namespaceLabel: kubeSystem, policyLabel: kubeSystemPolicy})
+				Expect(found).To(BeFalse())
+			})
+
+			It("unlocks an allowed protected namespace", func() {
+				restoreManagerArgs = patchManagerArgs([]string{
+					"--protected-namespace=" + strings.Join([]string{kubeSystem, allowedNamespace, lockedNamespace}, ","),
+					"--allow-protected-namespace=" + allowedNamespace,
+				}, &controllerPodName)
+
+				createTestNamespace(lockedNamespace, nil)
+				createTestNamespace(allowedNamespace, nil)
+				createFailingPod(lockedNamespace, failingPodName, nil)
+				createFailingPod(allowedNamespace, failingPodName, nil)
+				applyNamespacePolicy(lockedPolicy, lockedNamespace, nil)
+				applyNamespacePolicy(allowedPolicy, allowedNamespace, nil)
+				setUpKubeSystemScenario()
+
+				expectProtectedSkip(lockedPolicy, lockedNamespace)
+
+				expectPodDeleted(allowedNamespace, failingPodName)
+				Eventually(func(g Gomega) {
+					expectCondition(g, allowedPolicy, sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected,
+						metav1.ConditionFalse, reasonNoProtectedNamespaces)
+				}).Should(Succeed())
+
+				By("verifying the pods in the protected namespaces that are not allowed stay")
+				Consistently(func(g Gomega) {
+					g.Expect(podExists(g, lockedNamespace, failingPodName)).To(BeTrue())
+					g.Expect(podExists(g, kubeSystem, kubeSystemPod)).To(BeTrue())
+				}, 15*time.Second).Should(Succeed())
+			})
 		})
 	})
 })

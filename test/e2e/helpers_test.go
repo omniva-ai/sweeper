@@ -103,6 +103,12 @@ const (
 	reasonEvaluated             = "Evaluated"
 	reasonNoProtectedNamespaces = "NoProtectedNamespaces"
 	reasonDisabled              = "Disabled"
+	reasonProtectedExcluded     = "ProtectedNamespacesExcluded"
+)
+
+const (
+	managerDeploymentName = "sweeper-controller-manager"
+	managerArgsPath       = "/spec/template/spec/containers/0/args"
 )
 
 // waitForControllerPod waits until exactly one controller-manager pod that is not terminating
@@ -134,6 +140,57 @@ func waitForControllerPod() string {
 		podName = podNames[0]
 	}).Should(Succeed())
 	return podName
+}
+
+// patchManagerArgs appends args to the manager container, waits for the new controller pod to
+// hold the leader lease and stores its name in controllerPod. The returned func restores the
+// original args the same way.
+func patchManagerArgs(args []string, controllerPod *string) (restore func()) {
+	cmd := exec.Command("kubectl", "get", "deployment", managerDeploymentName, "-n", namespace,
+		"-o", "jsonpath={.spec.template.spec.containers[0].args}")
+	originalArgs, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the manager args")
+
+	ops := make([]map[string]any, 0, len(args))
+	for _, arg := range args {
+		ops = append(ops, map[string]any{"op": "add", "path": managerArgsPath + "/-", "value": arg})
+	}
+	By(fmt.Sprintf("restarting the manager with the extra args %v", args))
+	rolloutManager(ops, controllerPod)
+
+	return func() {
+		By("restoring the original manager args")
+		rolloutManager([]map[string]any{
+			{"op": "replace", "path": managerArgsPath, "value": json.RawMessage(originalArgs)},
+		}, controllerPod)
+	}
+}
+
+// rolloutManager applies the JSON patch ops to the manager Deployment, waits for the rollout and
+// for the new controller pod to hold the leader lease, and stores the pod name in controllerPod.
+func rolloutManager(ops []map[string]any, controllerPod *string) {
+	patch, err := json.Marshal(ops)
+	Expect(err).NotTo(HaveOccurred())
+	cmd := exec.Command("kubectl", "patch", "deployment", managerDeploymentName, "-n", namespace,
+		"--type=json", "-p", string(patch))
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to patch the manager Deployment")
+
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+managerDeploymentName,
+		"-n", namespace, "--timeout=3m")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "manager rollout did not finish")
+
+	*controllerPod = waitForControllerPod()
+
+	// The old pod does not release the lease on exit, so the new pod waits for it to expire.
+	By("waiting for the new controller pod to acquire the leader lease")
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "logs", *controllerPod, "-n", namespace)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(MatchRegexp("(?i)successfully acquired lease"))
+	}).Should(Succeed())
 }
 
 // applyObject applies obj, encoded as JSON, with kubectl apply.
@@ -306,6 +363,18 @@ func expectCondition(g Gomega, policy, condType string, status metav1.ConditionS
 	gotStatus, gotReason, message := policyCondition(g, policy, condType)
 	g.Expect(gotStatus).To(Equal(string(status)), "%s condition: %s", condType, message)
 	g.Expect(gotReason).To(Equal(reason), "%s condition: %s", condType, message)
+}
+
+// expectProtectedSkip waits until the policy reports ns as an excluded protected namespace.
+func expectProtectedSkip(policy, ns string) {
+	By(fmt.Sprintf("verifying the PodSweepPolicy %s skips the protected namespace %s", policy, ns))
+	Eventually(func(g Gomega) {
+		status, reason, message := policyCondition(g, policy,
+			sweeperv1alpha1.ConditionTypeNamespacesSkippedProtected)
+		g.Expect(status).To(Equal(string(metav1.ConditionTrue)), message)
+		g.Expect(reason).To(Equal(reasonProtectedExcluded))
+		g.Expect(message).To(ContainSubstring(ns))
+	}).Should(Succeed())
 }
 
 // warningEventReasons returns the reasons of the Warning events about the policy. The policy is
